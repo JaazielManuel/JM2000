@@ -316,8 +316,8 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
 {
    if(trans.type == TRADE_TRANSACTION_ORDER_ADD ||
       trans.type == TRADE_TRANSACTION_ORDER_DELETE ||
-      trans.type == TRADE_TRANSACTION_HISTORY_ADD ||
-      trans.type == TRADE_TRANSACTION_POSITION_UPDATE)
+      trans.type == TRADE_TRANSACTION_DEAL_ADD ||
+      trans.type == TRADE_TRANSACTION_HISTORY_ADD)
    {
       UpdatePositionTracker();
       SyncPendingOrders();
