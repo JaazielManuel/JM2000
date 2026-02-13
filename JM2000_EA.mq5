@@ -134,6 +134,39 @@ double   spreadHistory[100];
 int      spreadIndex = 0;
 bool     spreadHistoryReady = false;
 
+//--- Protótipos de funções
+void     UpdatePositionTracker();
+void     SyncPendingOrders();
+void     UpdatePriceCache();
+void     UpdateATRCache();
+void     CalculateAverageSpread();
+void     MonitorDrawdownAndSafeMode();
+bool     IsMarketConditionSafe();
+void     ApplyOptimizedTrailing();
+void     ManageContinuousPendingOrders();
+void     DisplayStatusInfo();
+double   CalculateDynamicLot();
+bool     HasSufficientMargin(double volume);
+double   NormalizeVolume(double volume);
+void     HandleTradeError(uint retcode);
+void     CountOpenPositions(int &buyCount, int &sellCount, int &totalCount);
+bool     CanOpenMorePositions(bool isBuy);
+int      GetAdaptiveUpdatePoints();
+void     ManageBuyStops(double lotSize, int updateThreshold, datetime currentTime);
+void     ManageSellStops(double lotSize, int updateThreshold, datetime currentTime);
+bool     CreateBuyStops(double lotSize, int count);
+bool     CreateSellStops(double lotSize, int count);
+double   GetValidPendingPrice(bool isBuy, int additionalOffset = 0);
+double   CalculateValidSL(double orderPrice, bool isBuy);
+bool     CanModifyOrder(ulong ticket);
+bool     CancelOrder(ulong ticket);
+ENUM_ORDER_TYPE_FILLING GetMarketFilling();
+bool     ClosePartialPosition(ulong ticket, double volume);
+bool     ModifyPositionSL(ulong ticket, double newSL);
+void     ApplyIndividualTrailing();
+void     ApplyDirectionalTrailing();
+void     ApplyGlobalTrailing();
+
 //+------------------------------------------------------------------+
 //| Remove elemento do array                                         |
 //+------------------------------------------------------------------+
