@@ -83,8 +83,6 @@ struct PositionTracker
    bool     isBuy;
    bool     breakEvenSet;
    bool     partialClosed;
-   double   highestProfit;
-   double   highestPrice;  // BUY: maior Bid alcançado / SELL: menor Ask alcançado
    datetime openTime;
 };
 
@@ -110,8 +108,21 @@ double cachedTickSize   = 0;
 double minVolume        = 0;
 double maxVolume        = 0;
 double stepVolume       = 0;
+double invPoint         = 0;
+
+//--- Pre-calculated distances (Price)
+double preTrailDist     = 0;
+double preStepDist      = 0;
+double preBEPoint       = 0;
+double preBEPlus        = 0;
+double preOffset        = 0;
+double preSpacing       = 0;
+double riskFactor       = 0;
+double partialFactor    = 0;
+double marginFactor     = 0;
 
 //--- Cache Dinâmico (Tick Data)
+MqlTick currentTick;
 double cachedBid        = 0;
 double cachedAsk        = 0;
 double cachedSpread     = 0;
@@ -244,12 +255,24 @@ int OnInit()
    adjustedOffsetPoints    = MathMax(OffsetPoints,    stopsLevel + 2);
    adjustedStopLossPoints  = MathMax(StopLossPoints,  stopsLevel + 2);
 
-   ArrayResize(buyStopTickets,  0);
-   ArrayResize(sellStopTickets, 0);
-   ArrayResize(positions, 0);
+   ArrayResize(buyStopTickets,  0, 40);
+   ArrayResize(sellStopTickets, 0, 40);
+   ArrayResize(positions, 0, 100);
    ArrayInitialize(spreadHistory, 0);
 
    maxEquityReached = AccountInfoDouble(ACCOUNT_EQUITY);
+
+   // Pre-cálculos
+   invPoint     = (cachedPoint > 0) ? 1.0 / cachedPoint : 0;
+   preTrailDist = TrailingStopPoints * cachedPoint;
+   preStepDist  = TrailingStepPoints * cachedPoint;
+   preBEPoint   = BreakEvenPoints * cachedPoint;
+   preBEPlus    = BreakEvenPlusPoints * cachedPoint;
+   preOffset    = adjustedOffsetPoints * cachedPoint;
+   preSpacing   = SpacingPoints * cachedPoint;
+   riskFactor   = RiskPercent * 0.01;
+   partialFactor = PartialClosePercent * 0.01;
+   marginFactor = (100.0 - MarginSafetyPercent) * 0.01;
 
    // Inicializa indicador ATR de forma eficiente
    handleATR = iATR(_Symbol, PERIOD_M1, 14);
@@ -293,10 +316,21 @@ int OnInit()
 void OnTick()
 {
    UpdatePriceCache();
-   UpdateATRCache();
    MonitorDrawdownAndSafeMode();
 
-   if(!IsMarketConditionSafe()) return;
+   if(safeModeActive)
+   {
+      DisplayStatusInfo();
+      return;
+   }
+
+   if(!IsMarketConditionSafe())
+   {
+      DisplayStatusInfo();
+      return;
+   }
+
+   UpdateATRCache();
 
    // ✅ Sistema de trailing otimizado
    ApplyOptimizedTrailing();
@@ -389,8 +423,6 @@ void UpdatePositionTracker()
             positions[sz].isBuy          = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
             positions[sz].breakEvenSet   = false;
             positions[sz].partialClosed  = false;
-            positions[sz].highestProfit  = 0;
-            positions[sz].highestPrice   = positions[sz].isBuy ? cachedBid : cachedAsk;
             positions[sz].openTime       = (datetime)PositionGetInteger(POSITION_TIME);
 
             if(ShowChartInfo)
@@ -436,40 +468,21 @@ void ApplyOptimizedTrailing()
 //+------------------------------------------------------------------+
 void ApplyIndividualTrailing()
 {
-   for(int i = 0; i < ArraySize(positions); i++)
+   int sz = ArraySize(positions);
+   for(int i = 0; i < sz; i++)
    {
-      if(!PositionSelectByTicket(positions[i].ticket)) continue;
-
       double currentPrice = positions[i].isBuy ? cachedBid : cachedAsk;
-      double currentProfit = PositionGetDouble(POSITION_PROFIT);
-
-      // Atualiza maior preço alcançado
-      if(positions[i].isBuy)
-      {
-         if(currentPrice > positions[i].highestPrice)
-            positions[i].highestPrice = currentPrice;
-      }
-      else
-      {
-         if(currentPrice < positions[i].highestPrice)
-            positions[i].highestPrice = currentPrice;
-      }
-
-      // Atualiza maior lucro
-      if(currentProfit > positions[i].highestProfit)
-         positions[i].highestProfit = currentProfit;
 
       // 1️⃣ BreakEven
-      if(BreakEvenPoints > 0 && !positions[i].breakEvenSet)
+      if(preBEPoint > 0 && !positions[i].breakEvenSet)
       {
-         double profitPoints = positions[i].isBuy
-            ? (currentPrice - positions[i].entryPrice) / cachedPoint
-            : (positions[i].entryPrice - currentPrice) / cachedPoint;
+         bool beTriggered = positions[i].isBuy
+            ? (currentPrice >= positions[i].entryPrice + preBEPoint)
+            : (currentPrice <= positions[i].entryPrice - preBEPoint);
 
-         if(profitPoints >= BreakEvenPoints)
+         if(beTriggered)
          {
-            double newSL = positions[i].entryPrice +
-                          (positions[i].isBuy ? 1 : -1) * BreakEvenPlusPoints * cachedPoint;
+            double newSL = positions[i].entryPrice + (positions[i].isBuy ? preBEPlus : -preBEPlus);
             newSL = NormalizeDouble(newSL, cachedDigits);
 
             if(ModifyPositionSL(positions[i].ticket, newSL))
@@ -478,14 +491,13 @@ void ApplyIndividualTrailing()
                positions[i].currentSL = newSL;
 
                if(ShowChartInfo)
-                  Print("⚖️ BreakEven #", positions[i].ticket,
-                        " @ ", DoubleToString(newSL, cachedDigits));
+                  Print("⚖️ BreakEven #", positions[i].ticket, " @ ", DoubleToString(newSL, cachedDigits));
 
                // Fechamento parcial
-               if(UsePartialClose && !positions[i].partialClosed && PartialClosePercent > 0)
+               if(UsePartialClose && !positions[i].partialClosed && partialFactor > 0)
                {
-                  double closeVolume = NormalizeVolume(positions[i].volume * PartialClosePercent / 100.0);
-                  if(closeVolume >= SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN))
+                  double closeVolume = NormalizeVolume(positions[i].volume * partialFactor);
+                  if(closeVolume >= minVolume)
                   {
                      if(ClosePartialPosition(positions[i].ticket, closeVolume))
                      {
@@ -493,8 +505,7 @@ void ApplyIndividualTrailing()
                         positions[i].volume -= closeVolume;
 
                         if(ShowChartInfo)
-                           Print("📉 Fechamento parcial #", positions[i].ticket,
-                                 " | ", closeVolume, " lots");
+                           Print("📉 Fechamento parcial #", positions[i].ticket, " | ", closeVolume, " lots");
                      }
                   }
                }
@@ -503,42 +514,31 @@ void ApplyIndividualTrailing()
       }
 
       // 2️⃣ Trailing Stop
-      double trailDist = TrailingStopPoints * cachedPoint;
-      double stepDist  = TrailingStepPoints * cachedPoint;
-      double newSL     = 0;
-
       if(positions[i].isBuy)
       {
-         newSL = NormalizeDouble(currentPrice - trailDist, cachedDigits);
+         double newSL = NormalizeDouble(currentPrice - preTrailDist, cachedDigits);
 
-         // Só move se estiver em lucro e respeitar o step
-         if(newSL > positions[i].entryPrice &&
-            (positions[i].currentSL == 0 || newSL > positions[i].currentSL + stepDist))
+         if(newSL > positions[i].entryPrice && (positions[i].currentSL == 0 || newSL > positions[i].currentSL + preStepDist))
          {
             if(ModifyPositionSL(positions[i].ticket, newSL))
             {
                positions[i].currentSL = newSL;
-
                if(ShowChartInfo)
-                  Print("📈 Trailing BUY #", positions[i].ticket,
-                        " | SL: ", DoubleToString(newSL, cachedDigits));
+                  Print("📈 Trailing BUY #", positions[i].ticket, " | SL: ", DoubleToString(newSL, cachedDigits));
             }
          }
       }
       else // SELL
       {
-         newSL = NormalizeDouble(currentPrice + trailDist, cachedDigits);
+         double newSL = NormalizeDouble(currentPrice + preTrailDist, cachedDigits);
 
-         if(newSL < positions[i].entryPrice &&
-            (positions[i].currentSL == 0 || newSL < positions[i].currentSL - stepDist))
+         if(newSL < positions[i].entryPrice && (positions[i].currentSL == 0 || newSL < positions[i].currentSL - preStepDist))
          {
             if(ModifyPositionSL(positions[i].ticket, newSL))
             {
                positions[i].currentSL = newSL;
-
                if(ShowChartInfo)
-                  Print("📉 Trailing SELL #", positions[i].ticket,
-                        " | SL: ", DoubleToString(newSL, cachedDigits));
+                  Print("📉 Trailing SELL #", positions[i].ticket, " | SL: ", DoubleToString(newSL, cachedDigits));
             }
          }
       }
@@ -568,23 +568,21 @@ void ApplyDirectionalTrailing()
       }
    }
 
-   const double trailDist = TrailingStopPoints * cachedPoint;
-   const double stepDist  = TrailingStepPoints * cachedPoint;
-   const double newBuySL  = (buyMaxPrice > 0) ? NormalizeDouble(buyMaxPrice - trailDist, cachedDigits) : 0;
-   const double newSellSL = (sellMinPrice < DBL_MAX) ? NormalizeDouble(sellMinPrice + trailDist, cachedDigits) : 0;
+   const double newBuySL  = (buyMaxPrice > 0) ? NormalizeDouble(buyMaxPrice - preTrailDist, cachedDigits) : 0;
+   const double newSellSL = (sellMinPrice < DBL_MAX) ? NormalizeDouble(sellMinPrice + preTrailDist, cachedDigits) : 0;
 
    for(int i = 0; i < sz; i++)
    {
       if(positions[i].isBuy)
       {
-         if(newBuySL > positions[i].entryPrice && (positions[i].currentSL == 0 || newBuySL > positions[i].currentSL + stepDist))
+         if(newBuySL > positions[i].entryPrice && (positions[i].currentSL == 0 || newBuySL > positions[i].currentSL + preStepDist))
          {
             if(ModifyPositionSL(positions[i].ticket, newBuySL)) positions[i].currentSL = newBuySL;
          }
       }
       else
       {
-         if(newSellSL < positions[i].entryPrice && (positions[i].currentSL == 0 || newSellSL < positions[i].currentSL - stepDist))
+         if(newSellSL < positions[i].entryPrice && (positions[i].currentSL == 0 || newSellSL < positions[i].currentSL - preStepDist))
          {
             if(ModifyPositionSL(positions[i].ticket, newSellSL)) positions[i].currentSL = newSellSL;
          }
@@ -617,25 +615,23 @@ void ApplyGlobalTrailing()
       }
    }
 
-   const double trailDist = TrailingStopPoints * cachedPoint;
-   const double stepDist  = TrailingStepPoints * cachedPoint;
    const double avgBuyEntry = (totalBuyVolume > 0) ? buyWeightedPrice / totalBuyVolume : 0;
    const double avgSellEntry = (totalSellVolume > 0) ? sellWeightedPrice / totalSellVolume : 0;
-   const double newBuySL = NormalizeDouble(cachedBid - trailDist, cachedDigits);
-   const double newSellSL = NormalizeDouble(cachedAsk + trailDist, cachedDigits);
+   const double newBuySL = NormalizeDouble(cachedBid - preTrailDist, cachedDigits);
+   const double newSellSL = NormalizeDouble(cachedAsk + preTrailDist, cachedDigits);
 
    for(int i = 0; i < sz; i++)
    {
       if(positions[i].isBuy)
       {
-         if(totalBuyVolume > 0 && newBuySL > avgBuyEntry && (positions[i].currentSL == 0 || newBuySL > positions[i].currentSL + stepDist))
+         if(totalBuyVolume > 0 && newBuySL > avgBuyEntry && (positions[i].currentSL == 0 || newBuySL > positions[i].currentSL + preStepDist))
          {
             if(ModifyPositionSL(positions[i].ticket, newBuySL)) positions[i].currentSL = newBuySL;
          }
       }
       else
       {
-         if(totalSellVolume > 0 && newSellSL < avgSellEntry && (positions[i].currentSL == 0 || newSellSL < positions[i].currentSL - stepDist))
+         if(totalSellVolume > 0 && newSellSL < avgSellEntry && (positions[i].currentSL == 0 || newSellSL < positions[i].currentSL - preStepDist))
          {
             if(ModifyPositionSL(positions[i].ticket, newSellSL)) positions[i].currentSL = newSellSL;
          }
@@ -723,9 +719,12 @@ bool ModifyPositionSL(ulong ticket, double newSL)
 //+------------------------------------------------------------------+
 void UpdatePriceCache()
 {
-   cachedBid    = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   cachedAsk    = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   cachedSpread = (cachedAsk - cachedBid) / cachedPoint;
+   if(SymbolInfoTick(_Symbol, currentTick))
+   {
+      cachedBid    = currentTick.bid;
+      cachedAsk    = currentTick.ask;
+      cachedSpread = (cachedAsk - cachedBid) * invPoint;
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -884,8 +883,6 @@ int GetAdaptiveUpdatePoints()
 void ManageContinuousPendingOrders()
 {
    datetime currentTime = TimeCurrent();
-
-   if(currentTime - lastOrderUpdateTime < 1) return;
 
    double tradeLot = CalculateDynamicLot();
 
@@ -1111,8 +1108,7 @@ bool CreateSellStops(double lotSize, int count)
 //+------------------------------------------------------------------+
 double GetValidPendingPrice(bool isBuy, int additionalOffset = 0)
 {
-   int    totalOffset = adjustedOffsetPoints + additionalOffset;
-   double minDist     = totalOffset * cachedPoint;
+   double minDist = preOffset + additionalOffset * cachedPoint;
 
    if(isBuy)
       return NormalizeDouble(cachedAsk + minDist, cachedDigits);
@@ -1194,28 +1190,19 @@ double CalculateDynamicLot()
 {
    if(!UseDynamicLot) return Lots;
 
-   double accountBalance = AccountInfoDouble(ACCOUNT_BALANCE);
-   double accountEquity  = AccountInfoDouble(ACCOUNT_EQUITY);
-   double freeMargin     = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
-   double baseValue      = MathMin(accountBalance, accountEquity);
-
-   double riskAmount    = baseValue * (RiskPercent / 100.0);
-   double pointValue    = (cachedTickSize > 0)
-                          ? (cachedTickValue / cachedTickSize) * cachedPoint
-                          : cachedPoint * 10;
+   double baseValue   = MathMin(AccountInfoDouble(ACCOUNT_BALANCE), AccountInfoDouble(ACCOUNT_EQUITY));
+   double riskAmount  = baseValue * riskFactor;
+   double pointValue  = (cachedTickSize > 0) ? (cachedTickValue / cachedTickSize) * cachedPoint : cachedPoint * 10;
 
    if(pointValue <= 0) return Lots;
 
-   double calculatedLot = (adjustedStopLossPoints > 0)
-                          ? riskAmount / (adjustedStopLossPoints * pointValue)
-                          : Lots;
-
+   double calculatedLot = (adjustedStopLossPoints > 0) ? riskAmount / (adjustedStopLossPoints * pointValue) : Lots;
    calculatedLot = MathMin(calculatedLot, MaxLotSize);
 
    double requiredMargin = 0;
    if(OrderCalcMargin(ORDER_TYPE_BUY, _Symbol, calculatedLot, cachedAsk, requiredMargin))
    {
-      double safeMargin = freeMargin * ((100.0 - MarginSafetyPercent) / 100.0);
+      double safeMargin = AccountInfoDouble(ACCOUNT_MARGIN_FREE) * marginFactor;
       if(requiredMargin > safeMargin && requiredMargin > 0)
          calculatedLot *= (safeMargin / requiredMargin);
    }
@@ -1228,12 +1215,10 @@ double CalculateDynamicLot()
 //+------------------------------------------------------------------+
 bool HasSufficientMargin(double volume)
 {
-   double freeMargin     = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
    double requiredMargin = 0;
    if(!OrderCalcMargin(ORDER_TYPE_BUY, _Symbol, volume, cachedAsk, requiredMargin))
       return false;
-   double safeMargin = freeMargin * ((100.0 - MarginSafetyPercent) / 100.0);
-   return (requiredMargin <= safeMargin);
+   return (requiredMargin <= AccountInfoDouble(ACCOUNT_MARGIN_FREE) * marginFactor);
 }
 
 //+------------------------------------------------------------------+
