@@ -12,15 +12,15 @@
 #include <Trade\SymbolInfo.mqh>
 
 /*
-   SISTEMA DE TRAILING STOP UNIVERSAL INTELIGENTE (INSTITUTIONAL+ VERSION)
+   SISTEMA DE TRAILING STOP UNIVERSAL INTELIGENTE (MASTER VERSION)
 
-   Esta versão inclui:
-   - Ajuste dinâmico de volatilidade (ATR)
-   - Filtro de Spread institucional
-   - Performance otimizada com Throttling e Micro-otimizações (Cache de tipos)
-   - Lógica de "True Step" (movimento em blocos)
-   - Proteção rigorosa de Stop/Freeze levels (ideal para Deriv/Sintéticos)
-   - Trailing estrutural (apenas move após o preço de abertura)
+   Esta versão representa o ápice da engenharia MQL5:
+   - Throttling Independente: Gestão de tempo por instância (instanciação múltipla segura).
+   - Institutional ATR Scaling: Compara volatilidade atual vs média de longo prazo (Handle duplo).
+   - True Step Logic: Matemática limpa para travamento de blocos de lucro estruturais.
+   - Spread Institutional Filter: Proteção contra slippage e spikes de liquidez.
+   - Micro-Otimização Master: Cache de tipos e buffers de profundidade reduzida.
+   - Proteção Robusta: Gestão total de Stop/Freeze levels com margens de segurança.
 */
 
 enum ENUM_TRAILING_MODE
@@ -47,17 +47,19 @@ private:
    string         m_symbol_name;
 
    // Performance & Throttling
+   uint           m_last_tick_ms;
    int            m_throttle_ms;
 
    // Parâmetros Gerais
    ENUM_TRAILING_MODE m_mode;
    double         m_max_spread;
-   bool           m_only_above_entry; // Trailing apenas acima/abaixo do preço de entrada
+   bool           m_only_above_entry;
 
-   // ATR
+   // ATR handles
    int            m_atr_period;
    double         m_atr_multiplier;
    int            m_atr_handle;
+   int            m_atr_handle_slow; // Handle para média de longo prazo
 
    // PSAR
    double         m_psar_step;
@@ -91,9 +93,7 @@ private:
    double         m_be_profit;
 
    // Métodos auxiliares
-   double         GetATRValue(int index);
-   double         GetPSARValue(int index);
-   double         GetMAValue(int index);
+   double         GetIndicatorValue(int handle, int index);
    double         GetBollingerValue(ENUM_POSITION_TYPE type, int index);
    double         GetFractalValue(ENUM_POSITION_TYPE type, int index);
    double         GetHLValue(ENUM_POSITION_TYPE type, int candles);
@@ -135,13 +135,15 @@ CUniversalTrailing::CUniversalTrailing() :
    m_symbol_name(""),
    m_mode(TRL_MODE_NONE),
    m_atr_handle(INVALID_HANDLE),
+   m_atr_handle_slow(INVALID_HANDLE),
    m_psar_handle(INVALID_HANDLE),
    m_ma_handle(INVALID_HANDLE),
    m_bb_handle(INVALID_HANDLE),
    m_fractal_handle(INVALID_HANDLE),
    m_max_spread(0),
    m_throttle_ms(250),
-   m_only_above_entry(true) // Padrão robusto: apenas move após o lucro
+   m_last_tick_ms(0),
+   m_only_above_entry(true)
 {
    m_be_activation = 0;
    m_be_profit = 0;
@@ -164,6 +166,7 @@ CUniversalTrailing::~CUniversalTrailing()
 void CUniversalTrailing::ReleaseHandles()
 {
    if(m_atr_handle != INVALID_HANDLE) { IndicatorRelease(m_atr_handle); m_atr_handle = INVALID_HANDLE; }
+   if(m_atr_handle_slow != INVALID_HANDLE) { IndicatorRelease(m_atr_handle_slow); m_atr_handle_slow = INVALID_HANDLE; }
    if(m_psar_handle != INVALID_HANDLE) { IndicatorRelease(m_psar_handle); m_psar_handle = INVALID_HANDLE; }
    if(m_ma_handle != INVALID_HANDLE) { IndicatorRelease(m_ma_handle); m_ma_handle = INVALID_HANDLE; }
    if(m_bb_handle != INVALID_HANDLE) { IndicatorRelease(m_bb_handle); m_bb_handle = INVALID_HANDLE; }
@@ -189,7 +192,10 @@ void CUniversalTrailing::SetATR(int period, double multiplier)
    m_atr_period = period;
    m_atr_multiplier = multiplier;
    if(m_atr_handle != INVALID_HANDLE) IndicatorRelease(m_atr_handle);
+   if(m_atr_handle_slow != INVALID_HANDLE) IndicatorRelease(m_atr_handle_slow);
+
    m_atr_handle = iATR(m_symbol_name, PERIOD_CURRENT, m_atr_period);
+   m_atr_handle_slow = iATR(m_symbol_name, PERIOD_CURRENT, m_atr_period * 5); // 5x mais lento para média estrutural
 }
 
 //+------------------------------------------------------------------+
@@ -241,14 +247,14 @@ void CUniversalTrailing::SetFractals()
 //+------------------------------------------------------------------+
 void CUniversalTrailing::Process()
 {
-   // Performance Throttling
-   static uint last_tick_ms = 0;
-   if(GetTickCount() - last_tick_ms < (uint)m_throttle_ms) return;
-   last_tick_ms = GetTickCount();
+   // Throttling Independente por Instância
+   uint now_ms = GetTickCount();
+   if(now_ms - m_last_tick_ms < (uint)m_throttle_ms) return;
+   m_last_tick_ms = now_ms;
 
    if(!m_symbol.RefreshRates()) return;
 
-   // Filtro de Spread
+   // Filtro de Spread Institutional
    if(m_max_spread > 0)
    {
       double spread = (m_symbol.Ask() - m_symbol.Bid()) / m_symbol.Point();
@@ -261,7 +267,7 @@ void CUniversalTrailing::Process()
       {
          if(m_position.Magic() == m_magic && m_position.Symbol() == m_symbol_name)
          {
-            // Micro-otimização: Cache de propriedades da posição
+            // Cache de Propriedades (Micro-otimização Master)
             ENUM_POSITION_TYPE type = m_position.PositionType();
             double current_sl = m_position.StopLoss();
             double open_price = m_position.PriceOpen();
@@ -283,15 +289,7 @@ void CUniversalTrailing::Process()
                                     open_price + (m_be_profit * m_symbol.Point()) :
                                     open_price - (m_be_profit * m_symbol.Point());
 
-                  bool can_be = false;
-                  if(type == POSITION_TYPE_BUY)
-                  {
-                     if(current_sl < be_price) can_be = true;
-                  }
-                  else
-                  {
-                     if(current_sl > be_price || current_sl == 0) can_be = true;
-                  }
+                  bool can_be = (type == POSITION_TYPE_BUY) ? (current_sl < be_price) : (current_sl > be_price || current_sl == 0);
 
                   if(can_be && IsStopLevelOk(current_price, be_price, type))
                   {
@@ -308,29 +306,31 @@ void CUniversalTrailing::Process()
             {
                case TRL_MODE_ATR:
                   {
-                     double atr = GetATRValue(1);
-                     if(atr > 0)
+                     double atr_now = GetIndicatorValue(m_atr_handle, 1);
+                     double atr_avg = GetIndicatorValue(m_atr_handle_slow, 1);
+
+                     if(atr_now > 0 && atr_avg > 0)
                      {
-                        double atr_slow = GetATRValue(10);
-                        double vol_factor = (atr_slow > 0) ? (atr / atr_slow) : 1.0;
-                        if(vol_factor > 1.25) vol_factor = 1.25;
-                        if(vol_factor < 0.8) vol_factor = 0.8;
+                        // Institutional Volatility Scaling (Handle Duplo)
+                        double vol_factor = atr_now / atr_avg;
+                        if(vol_factor > 1.3) vol_factor = 1.3; // Cap de expansão
+                        if(vol_factor < 0.7) vol_factor = 0.7; // Cap de contração
 
                         double dynamic_multiplier = m_atr_multiplier * vol_factor;
 
                         new_sl = (type == POSITION_TYPE_BUY) ?
-                                 bid - (atr * dynamic_multiplier) :
-                                 ask + (atr * dynamic_multiplier);
+                                 bid - (atr_now * dynamic_multiplier) :
+                                 ask + (atr_now * dynamic_multiplier);
                      }
                   }
                   break;
 
                case TRL_MODE_PSAR:
-                  new_sl = GetPSARValue(1);
+                  new_sl = GetIndicatorValue(m_psar_handle, 1);
                   break;
 
                case TRL_MODE_MA:
-                  new_sl = GetMAValue(1);
+                  new_sl = GetIndicatorValue(m_ma_handle, 1);
                   break;
 
                case TRL_MODE_HL:
@@ -353,28 +353,24 @@ void CUniversalTrailing::Process()
                   {
                      double step_pts = m_step_size * m_symbol.Point();
                      double min_prof = m_step_min_profit * m_symbol.Point();
+                     double current_profit = (type == POSITION_TYPE_BUY) ? (bid - open_price) : (open_price - ask);
 
-                     if(type == POSITION_TYPE_BUY)
+                     if(current_profit > min_prof)
                      {
-                        if(bid - open_price > min_prof)
+                        // True Step Math (Matemática Limpa Master)
+                        double blocks = MathFloor(current_profit / step_pts);
+                        if(blocks >= 1.0)
                         {
-                           double blocks = MathFloor((bid - open_price) / step_pts);
-                           new_sl = open_price + (blocks * step_pts) - step_pts;
-                        }
-                     }
-                     else
-                     {
-                        if(open_price - ask > min_prof)
-                        {
-                           double blocks = MathFloor((open_price - ask) / step_pts);
-                           new_sl = open_price - (blocks * step_pts) + step_pts;
+                           new_sl = (type == POSITION_TYPE_BUY) ?
+                                    open_price + ((blocks - 1.0) * step_pts) :
+                                    open_price - ((blocks - 1.0) * step_pts);
                         }
                      }
                   }
                   break;
             }
 
-            // Filtro Estrutural de Entrada (Opcional - Robusto)
+            // Filtro Estrutural Master
             if(m_only_above_entry && new_sl > 0)
             {
                if(type == POSITION_TYPE_BUY && new_sl <= open_price) new_sl = 0;
@@ -407,35 +403,13 @@ void CUniversalTrailing::Process()
 }
 
 //+------------------------------------------------------------------+
-//| Get ATR Value                                                    |
+//| Get Indicator Value (Generic)                                    |
 //+------------------------------------------------------------------+
-double CUniversalTrailing::GetATRValue(int index)
+double CUniversalTrailing::GetIndicatorValue(int handle, int index)
 {
-   if(m_atr_handle == INVALID_HANDLE) return 0;
+   if(handle == INVALID_HANDLE) return 0;
    double buffer[1];
-   if(CopyBuffer(m_atr_handle, 0, index, 1, buffer) < 1) return 0;
-   return buffer[0];
-}
-
-//+------------------------------------------------------------------+
-//| Get PSAR Value                                                   |
-//+------------------------------------------------------------------+
-double CUniversalTrailing::GetPSARValue(int index)
-{
-   if(m_psar_handle == INVALID_HANDLE) return 0;
-   double buffer[1];
-   if(CopyBuffer(m_psar_handle, 0, index, 1, buffer) < 1) return 0;
-   return buffer[0];
-}
-
-//+------------------------------------------------------------------+
-//| Get MA Value                                                     |
-//+------------------------------------------------------------------+
-double CUniversalTrailing::GetMAValue(int index)
-{
-   if(m_ma_handle == INVALID_HANDLE) return 0;
-   double buffer[1];
-   if(CopyBuffer(m_ma_handle, 0, index, 1, buffer) < 1) return 0;
+   if(CopyBuffer(handle, 0, index, 1, buffer) < 1) return 0;
    return buffer[0];
 }
 
@@ -461,14 +435,14 @@ double CUniversalTrailing::GetHLValue(ENUM_POSITION_TYPE type, int candles)
       double lows[];
       ArraySetAsSeries(lows, true);
       if(CopyLow(m_symbol_name, PERIOD_CURRENT, 1, candles, lows) > 0)
-         return lows[ArrayMinimum(lows)];
+         return lows[ArrayMinimum(lows, 0, WHOLE_ARRAY)];
    }
    else
    {
       double highs[];
       ArraySetAsSeries(highs, true);
       if(CopyHigh(m_symbol_name, PERIOD_CURRENT, 1, candles, highs) > 0)
-         return highs[ArrayMaximum(highs)];
+         return highs[ArrayMaximum(highs, 0, WHOLE_ARRAY)];
    }
    return 0;
 }
@@ -483,7 +457,6 @@ double CUniversalTrailing::GetFractalValue(ENUM_POSITION_TYPE type, int index)
    ArraySetAsSeries(buffer, true);
    int buffer_idx = (type == POSITION_TYPE_BUY) ? 1 : 0;
 
-   // Otimização: Copia apenas 30 barras em vez de 100
    if(CopyBuffer(m_fractal_handle, buffer_idx, 0, 30, buffer) > 0)
    {
       int limit = ArraySize(buffer);
