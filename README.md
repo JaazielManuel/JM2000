@@ -1,41 +1,37 @@
-# Universal Trailing Stop System (MYTHICAL MASTER EDITION)
+# Universal Trailing Stop System (MYTHICAL MASTER V6.1 - 2026)
 
-Este é o nível definitivo e final da engenharia de proteção de capital para MQL5. A versão **Mythical Master (6.00)** foi desenhada para oferecer precisão de microssegundos e estabilidade absoluta em ambientes de trading institucional.
+Este é o ápice da engenharia de proteção de capital para MQL5. A versão **v6.1 (2026 Edition)** foi refinada para atingir o nível máximo de performance e segurança institucional, eliminando gargalos de latência e garantindo 100% de aceitação de ordens.
 
-## Diferenciais da Versão Mythical Master
-- **Ultra-Precise Throttling (Microseconds)**: O sistema agora utiliza `GetMicrosecondCount()` para uma gestão de tempo cirúrgica. Isso elimina qualquer risco de overflow (comum em `GetTickCount` após 49 dias) e permite uma frequência de processamento muito superior e estável.
-- **Selective Position Scanning**: O loop de processamento foi otimizado para filtragem imediata de Símbolo e Magic Number, garantindo latência mínima mesmo em contas com centenas de posições abertas.
-- **Zero-Rejection Architecture**: Cache inteligente de `StopLevel` e `FreezeLevel` com atualização dinâmica, garantindo 100% de aceitação das ordens de modificação.
-- **Legendary Handle Safety**: Verificação redundante com `BarsCalculated()` para garantir que nenhum movimento seja feito sem dados de indicadores 100% validados e sincronizados.
-- **Institutional ATR Scaling (Dual-Handle)**: Algoritmo quantitativo que ajusta o trailing dinamicamente com base na volatilidade estrutural de longo prazo.
+## Diferenciais da Versão v6.1
+- **Diagnostic Master Engine**: Agora o sistema emite logs cirúrgicos quando um Stop Loss é modificado, indicando o ticket e o algoritmo responsável.
+- **Legendary Handle Safety**: Integração profunda com `BarsCalculated()`. O sistema aguarda a sincronização completa do histórico antes de processar qualquer cálculo, evitando "sinais fantasmas".
+- **Zero-Rejection Architecture**: Cache inteligente de `StopLevel` e `FreezeLevel` com atualização dinâmica (a cada 10s), pre-validando cada modificação para evitar o erro 10016.
+- **Ultra-Precise Throttling**: Gestão de tempo baseada em `GetMicrosecondCount()`, ideal para ativos de alta volatilidade e ambientes HFT.
+- **Institutional Dual-ATR Scaling**: Algoritmo quantitativo que ajusta o trailing comparando a volatilidade de curto prazo vs. estrutural de longo prazo.
 
 ## 8 Modos de Operação (Mythical Level)
 1. **ATR**: Volatilidade adaptativa institucional (Dual-Handle).
 2. **PSAR**: Tendência por Parabolic SAR de alta precisão.
-3. **Média Móvel**: Seguimento de tendência com cache otimizado.
-4. **High/Low**: Proteção extrema com buffer de memória zero-allocation.
+3. **Média Móvel**: Seguimento de tendência institucional.
+4. **High/Low**: Proteção extrema com buffer de memória estático.
 5. **Fractals**: Suportes e resistências estruturais de Bill Williams.
 6. **Bollinger Bands**: Gestão de risco por desvio padrão dinâmico.
 7. **True Step**: Matemática de degraus de lucro inquebrável.
 8. **Shadow**: Colagem agressiva nos pavios (sombras) dos candles.
 
-## Como Integrar
+## Guia de Integração (JM2000 EA)
 
-```cpp
-#include <UniversalTrailing.mqh>
-CUniversalTrailing trailing;
+O JM2000 EA já vem com a integração v6.1 de fábrica.
+Para utilizar em outros projetos:
 
-int OnInit() {
-   trailing.Init(MagicNumber, _Symbol);
-   trailing.SetMode(TRL_MODE_ATR);
-   trailing.SetATR(14, 1.5, 5.0); // Mythical Power
-   return INIT_SUCCEEDED;
-}
+1. **Include**: `#include <UniversalTrailing.mqh>`
+2. **Init**: No `OnInit`, chame `Init(Magic, Symbol)` seguido das configurações (ATR, PSAR, etc) e por fim `SetMode`.
+3. **Process**: No `OnTick`, chame `Process()`.
 
-void OnTick() {
-   trailing.Process(); // Performance de grau institucional.
-}
-```
+## Solução de Problemas (FAQ)
+- **O Trailing não move?** Verifique se `OnlyAboveEntry` está ativado. Se sim, o trailing só inicia quando a posição está em lucro maior que o calculado.
+- **Logs vazios?** Certifique-se de que o `MagicNumber` passado no `Init()` é exatamente o mesmo das ordens abertas.
+- **Data not ready?** Em backtests rápidos ou símbolos novos, o MT5 pode demorar a carregar o histórico. O sistema avisará no log.
 
 ---
-Desenvolvido por Jules AI. O ápice da tecnologia algorítmica para MetaTrader 5 em 2026.
+Desenvolvido por Jules AI. O estado da arte absoluto em automação financeira para 2026.

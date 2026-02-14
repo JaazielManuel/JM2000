@@ -4,8 +4,8 @@
 //|                                          https://neuraltrade.ai  |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026"
-#property version   "2.0"
-#property description "JM2000 EA V1 - Integrated with Mythical Master Trailing"
+#property version   "2.1"
+#property description "JM2000 EA V1 - Integrated with Mythical Master Trailing (2026 Edition)"
 
 #include <../Include/UniversalTrailing.mqh>
 
@@ -238,20 +238,24 @@ int OnInit() {
    // Aplica cores personalizadas ao gráfico
    ApplyCustomChartColors();
 
-   // Inicialização Trailing Master
+   // Inicialização Trailing Master (Ordem Cirúrgica)
+   Print("Master Trailing: Inicializando engine...");
    trailing.Init(MagicNumber, _Symbol);
-   trailing.SetMode(InpUseAdvancedTrailing ? InpTrailingMode : TRL_MODE_NONE);
    trailing.SetThrottle(InpThrottleMS);
    trailing.SetMaxSpread(InpMaxSpreadAllowed);
    trailing.SetOnlyAboveEntry(InpOnlyInProfit);
 
-   // Configurações Específicas
+   // Configurações Específicas antes de ativar o modo
    trailing.SetATR(InpATRPeriod, InpATRMultiplier, InpATRStructuralFactor);
    trailing.SetPSAR(InpPSARStep, InpPSARMax);
    trailing.SetMA(InpMAPeriod, 0, MODE_SMA, PRICE_CLOSE);
    trailing.SetHL(InpHLCount);
    trailing.SetStep(InpStepSizePts, InpStepMinProfitPts);
    trailing.SetBreakeven(InpBEActivationPts, InpBELockProfitPts);
+
+   // Ativação Final do Modo
+   trailing.SetMode(InpUseAdvancedTrailing ? InpTrailingMode : TRL_MODE_NONE);
+   Print("Master Trailing: Engine configurada. Modo: ", EnumToString(InpTrailingMode), " Ativo: ", InpUseAdvancedTrailing);
 
    Print("═══════════════════════════════════════════════");
    Print("JM2000 EA V1 Inicializada");
@@ -283,6 +287,9 @@ void OnTick() {
    // Trailing Master Integration
    if(InpUseAdvancedTrailing)
    {
+      static uint last_call_print = 0;
+      if(GetTickCount() - last_call_print > 5000) { Print("Master Trailing: Process Heartbeat (Positions: ", PositionsTotal(), ")"); last_call_print = GetTickCount(); }
+
       trailing.Process();
    }
    else
