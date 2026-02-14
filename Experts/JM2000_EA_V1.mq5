@@ -4,8 +4,8 @@
 //|                                          https://neuraltrade.ai  |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026"
-#property version   "2.2"
-#property description "JM2000 EA V1 - Omni-Adaptive Master Integration (2026 Edition)"
+#property version   "2.3"
+#property description "JM2000 EA V1 - Profit Master Elite Integration (2026 Edition)"
 
 #include <../Include/UniversalTrailing.mqh>
 
@@ -27,6 +27,7 @@ input bool   InpAdaptiveScaling = true;          // Auto-Escala (Sintéticos/Cry
 input bool   InpClusterMode = true;              // Modo Cluster (Unificar SL)?
 input double InpMaxSpreadAllowed = 50;           // Spread Máximo para Trailing (pts)
 input int    InpThrottleMS = 200;                // Throttle de Processamento (ms)
+input double InpMinDiffPts = 2.0;                // Diferença mínima para mover SL (pts)
 
 input group "== CONFIGURAÇÕES ADAPTATIVAS =="
 input int    InpATRPeriod = 14;                  // Período ATR
@@ -38,6 +39,10 @@ input int    InpMAPeriod = 20;                   // Período Média Móvel
 input int    InpHLCount = 3;                     // Velas para High/Low / Shadow
 input double InpStepSizePts = 150;               // Tamanho do Degrau (True Step)
 input double InpStepMinProfitPts = 50;           // Lucro Mínimo para Step (pts)
+
+input group "== TRAILING POR LUCRO (%) =="
+input double InpProfitLockPercent = 0.5;         // Porcentagem de Lucro para Travar (0.1 a 0.9)
+input double InpProfitActivationPts = 150;       // Ativação do Profit Trailing (pts)
 
 input group "== BREAKEVEN MASTER =="
 input double InpBEActivationPts = 200;           // Ativação Breakeven (pts)
@@ -248,6 +253,7 @@ int OnInit() {
    trailing.SetOnlyAboveEntry(InpOnlyInProfit);
    trailing.SetAdaptiveScaling(InpAdaptiveScaling);
    trailing.SetClusterMode(InpClusterMode);
+   trailing.SetMinDiff(InpMinDiffPts);
 
    // Configurações Específicas (Surgical Setup)
    trailing.SetATR(InpATRPeriod, InpATRMultiplier, InpATRStructuralFactor);
@@ -258,6 +264,7 @@ int OnInit() {
    trailing.SetFractals();
    trailing.SetStep(InpStepSizePts, InpStepMinProfitPts);
    trailing.SetBreakeven(InpBEActivationPts, InpBELockProfitPts);
+   trailing.SetProfitLock(InpProfitActivationPts, InpProfitLockPercent);
 
    // Ativação Final do Modo
    trailing.SetMode(InpUseAdvancedTrailing ? InpTrailingMode : TRL_MODE_NONE);

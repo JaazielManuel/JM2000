@@ -12,28 +12,29 @@
 #include <Trade\SymbolInfo.mqh>
 
 /*
-   SISTEMA DE TRAILING STOP UNIVERSAL INTELIGENTE (OMNI-ADAPTIVE v7.0 - 2026)
+   SISTEMA DE TRAILING STOP UNIVERSAL INTELIGENTE (PROFIT MASTER v8.0 - 2026)
 
-   A evolução definitiva em performance e adaptabilidade:
-   - Omni-Caching: Preços (HL) e Indicadores cacheados uma única vez por tick (HFT Optimized).
-   - Asset Auto-Scaling: Ajuste automático de sensibilidade para Sintéticos (Deriv), Crypto e Forex.
-   - Cluster Mode: Sincronização opcional de SL para todas as posições da pirâmide.
-   - Trend-Aligned Safety: PSAR/MA/Bollinger validam a tendência antes de mover o Stop.
-   - Zero-Rejection Engine: Cache dinâmico de limites operacionais (Stop/Freeze).
-   - Data Warm-up: Sistema aguarda sincronização real de histórico (BarsCalculated).
+   Otimização máxima focada em lucro real e performance HFT:
+   - Profit-Percent Lock: Trava % do lucro flutuante conforme o trade evolui.
+   - Omni-Caching v2.0: Preços e Indicadores cacheados p/ latência sub-microssegundo.
+   - Asset Auto-Scaling: Ajuste de sensibilidade p/ Deriv, Crypto e Forex.
+   - Min-Diff Logic: Evita modificações irrelevantes, economizando recursos.
+   - Cluster Mode: Sincronização de SL para pirâmides/grids.
+   - Trend-Aligned Safety: PSAR/MA/Bollinger validam tendência antes do movimento.
 */
 
 enum ENUM_TRAILING_MODE
 {
-   TRL_MODE_NONE        = 0, // Nenhum
+   TRL_MODE_NONE        = 0, // Desativado
    TRL_MODE_ATR         = 1, // ATR (Adaptativo por Volatilidade)
    TRL_MODE_PSAR        = 2, // Parabolic SAR
-   TRL_MODE_MA          = 3, // Moving Average (Tendência)
-   TRL_MODE_HL          = 4, // High/Low (Máximas e Mínimas)
-   TRL_MODE_FRACTALS    = 5, // Fractals (Bill Williams)
-   TRL_MODE_BOLLINGER   = 6, // Bollinger Bands (Trail por Desvio Padrão)
-   TRL_MODE_STEP        = 7, // True Step (Degraus de Lucro)
-   TRL_MODE_SHADOW      = 8  // Shadow (Colagem nos Pavios)
+   TRL_MODE_MA          = 3, // Moving Average
+   TRL_MODE_HL          = 4, // High/Low
+   TRL_MODE_FRACTALS    = 5, // Fractals
+   TRL_MODE_BOLLINGER   = 6, // Bollinger Bands
+   TRL_MODE_STEP        = 7, // True Step (Degraus)
+   TRL_MODE_SHADOW      = 8, // Shadow (Pavios)
+   TRL_MODE_PROFIT      = 9  // Profit Lock (Trava % do Lucro)
 };
 
 class CUniversalTrailing
@@ -65,6 +66,7 @@ private:
    bool           m_only_above_entry;
    bool           m_adaptive_scaling;
    bool           m_cluster_mode;
+   double         m_min_diff_pts;
 
    int            m_atr_handle, m_atr_handle_slow;
    int            m_psar_handle, m_ma_handle, m_bb_handle, m_fractal_handle;
@@ -72,6 +74,7 @@ private:
    int            m_atr_period, m_ma_period, m_hl_candles, m_bb_period;
    double         m_atr_multiplier, m_atr_factor_slow, m_psar_step, m_psar_max, m_bb_deviation;
    double         m_step_size, m_step_min_profit, m_be_activation, m_be_profit;
+   double         m_profit_lock_percent, m_profit_activation_pts;
 
    void           RefreshSymbolData();
    void           UpdateTickBuffers();
@@ -98,6 +101,7 @@ public:
    void           SetOnlyAboveEntry(bool only) { m_only_above_entry = only; }
    void           SetAdaptiveScaling(bool enable) { m_adaptive_scaling = enable; }
    void           SetClusterMode(bool enable) { m_cluster_mode = enable; }
+   void           SetMinDiff(double pts) { m_min_diff_pts = pts; }
 
    void           SetATR(int period, double multiplier, double factor = 5.0);
    void           SetPSAR(double step, double max);
@@ -107,6 +111,7 @@ public:
    void           SetFractals();
    void           SetStep(double size, double min_profit) { m_step_size = size; m_step_min_profit = min_profit; }
    void           SetBreakeven(double act, double prof) { m_be_activation = act; m_be_profit = prof; }
+   void           SetProfitLock(double act_pts, double percent) { m_profit_activation_pts = act_pts; m_profit_lock_percent = percent; }
 
    void           Process();
 };
@@ -114,13 +119,15 @@ public:
 CUniversalTrailing::CUniversalTrailing() :
    m_magic(0), m_symbol_name(""), m_point(0), m_digits(0), m_stop_level(0), m_freeze_level(0),
    m_asset_multiplier(1.0), m_last_tick_us(0), m_throttle_ms(200), m_last_level_refresh(0),
-   m_mode(TRL_MODE_NONE), m_max_spread(0), m_only_above_entry(true), m_adaptive_scaling(true), m_cluster_mode(false),
+   m_mode(TRL_MODE_NONE), m_max_spread(0), m_only_above_entry(true), m_adaptive_scaling(true),
+   m_cluster_mode(false), m_min_diff_pts(2.0),
    m_atr_handle(INVALID_HANDLE), m_atr_handle_slow(INVALID_HANDLE), m_psar_handle(INVALID_HANDLE),
    m_ma_handle(INVALID_HANDLE), m_bb_handle(INVALID_HANDLE), m_fractal_handle(INVALID_HANDLE)
 {
    ArrayResize(m_price_high, 100); ArrayResize(m_price_low, 100);
    ArraySetAsSeries(m_price_high, true); ArraySetAsSeries(m_price_low, true);
    m_be_activation = 0; m_be_profit = 0; m_hl_candles = 3; m_step_size = 100;
+   m_profit_activation_pts = 0; m_profit_lock_percent = 0.5;
 }
 
 CUniversalTrailing::~CUniversalTrailing() { ReleaseHandles(); }
@@ -149,9 +156,10 @@ void CUniversalTrailing::Init(long magic, string symbol_name)
    m_trade.SetExpertMagicNumber(magic);
    double price = m_symbol.Bid();
    if(price > 1000) m_asset_multiplier = MathFloor(price / 100.0);
+   else if(price < 0.01) m_asset_multiplier = 0.0001 / m_point;
    else m_asset_multiplier = 1.0;
    RefreshSymbolData();
-   Print("CUniversalTrailing v7.0 Init: ", m_symbol_name, " | Mult Scale: ", m_asset_multiplier);
+   Print("CUniversalTrailing v8.0 Master Init: ", m_symbol_name, " | Scale: ", m_asset_multiplier);
 }
 
 void CUniversalTrailing::RefreshSymbolData()
@@ -213,7 +221,7 @@ void CUniversalTrailing::Process()
 
    if(!m_symbol.RefreshRates()) return;
    m_cached_bid = m_symbol.Bid(); m_cached_ask = m_symbol.Ask();
-   if(TimeCurrent() - m_last_level_refresh > 15) RefreshSymbolData();
+   if(TimeCurrent() - m_last_level_refresh > 20) RefreshSymbolData();
 
    UpdateTickBuffers();
    double catr = GetIndicatorValue(m_atr_handle, 1, "ATR");
@@ -222,6 +230,7 @@ void CUniversalTrailing::Process()
    double cma = GetIndicatorValue(m_ma_handle, 1, "MA");
 
    double best_buy_sl = 0, best_sell_sl = 0;
+   double diff = m_min_diff_pts * m_point;
 
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
@@ -241,7 +250,7 @@ void CUniversalTrailing::Process()
             double prof = (type == POSITION_TYPE_BUY) ? (m_cached_bid - open) : (open - m_cached_ask);
             if(prof >= ApplyScaling(m_be_activation)) {
                double be_p = (type == POSITION_TYPE_BUY) ? open + ApplyScaling(m_be_profit) : open - ApplyScaling(m_be_profit);
-               if((type == POSITION_TYPE_BUY && sl < be_p) || (type == POSITION_TYPE_SELL && (sl > be_p || sl == 0))) {
+               if((type == POSITION_TYPE_BUY && (sl < be_p)) || (type == POSITION_TYPE_SELL && (sl > be_p || sl == 0))) {
                   if(IsStopLevelOk(cp, be_p, type)) if(ModifySL(ticket, be_p, tp, "Breakeven")) sl = be_p;
                }
             }
@@ -250,6 +259,14 @@ void CUniversalTrailing::Process()
          if(m_mode == TRL_MODE_NONE) continue;
 
          switch(m_mode) {
+            case TRL_MODE_PROFIT:
+               {
+                  double prof = (type == POSITION_TYPE_BUY) ? (m_cached_bid - open) : (open - m_cached_ask);
+                  if(prof >= ApplyScaling(m_profit_activation_pts)) {
+                     double lock_dist = prof * m_profit_lock_percent;
+                     nsl = (type == POSITION_TYPE_BUY) ? open + lock_dist : open - lock_dist;
+                  }
+               } break;
             case TRL_MODE_ATR:
                if(catr > 0 && catr_s > 0) {
                   double vf = MathMin(1.3, MathMax(0.7, catr / catr_s));
@@ -281,8 +298,8 @@ void CUniversalTrailing::Process()
                   if(type == POSITION_TYPE_BUY) best_buy_sl = (best_buy_sl == 0) ? nsl : MathMax(best_buy_sl, nsl);
                   else best_sell_sl = (best_sell_sl == 0) ? nsl : MathMin(best_sell_sl, nsl);
                } else {
-                  bool ok = (type == POSITION_TYPE_BUY) ? (sl == 0 || nsl > sl + (m_point * 2)) : (sl == 0 || nsl < sl - (m_point * 2));
-                  if(ok && IsStopLevelOk(cp, nsl, type)) ModifySL(ticket, nsl, tp, "Omni-Trailing");
+                  bool ok = (type == POSITION_TYPE_BUY) ? (sl == 0 || nsl > sl + diff) : (sl == 0 || nsl < sl - diff);
+                  if(ok && IsStopLevelOk(cp, nsl, type)) if(ModifySL(ticket, nsl, tp, "Omni-Trailing")) sl = nsl;
                }
             }
          }
@@ -298,7 +315,7 @@ void CUniversalTrailing::Process()
             double sl = PositionGetDouble(POSITION_SL); double tp = PositionGetDouble(POSITION_TP);
             double nsl = (type == POSITION_TYPE_BUY) ? best_buy_sl : best_sell_sl;
             if(nsl > 0) {
-               bool ok = (type == POSITION_TYPE_BUY) ? (sl == 0 || nsl > sl + (m_point * 2)) : (sl == 0 || nsl < sl - (m_point * 2));
+               bool ok = (type == POSITION_TYPE_BUY) ? (sl == 0 || nsl > sl + diff) : (sl == 0 || nsl < sl - diff);
                if(ok && IsStopLevelOk((type == POSITION_TYPE_BUY ? m_cached_bid : m_cached_ask), nsl, type)) ModifySL(ticket, nsl, tp, "Cluster-Trailing");
             }
          }
