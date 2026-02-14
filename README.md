@@ -1,24 +1,23 @@
-# Universal Trailing Stop System (ABSOLUTE MASTER EDITION)
+# Universal Trailing Stop System (SURGICAL MASTER EDITION)
 
-Este é o ápice da engenharia de proteção de capital para MQL5. A versão **Absolute Master (3.00)** foi refinada para atingir o nível máximo de performance (10/10), sendo ideal para setups de alta frequência (HFT) e gestão de múltiplas posições simultâneas.
+Este é o sistema de Trailing Stop definitivo para MQL5, elevado ao **Nível 10+ (Surgical Master)**. Esta versão (4.00) foi desenhada para eliminar qualquer gargalo de performance e garantir estabilidade absoluta em ambientes de trading de alta frequência (HFT).
 
-## Diferenciais da Versão Absolute Master
-- **Tick Caching Engine**: Os valores dos indicadores são capturados apenas uma vez por ciclo de processamento e compartilhados entre todas as posições abertas, reduzindo drasticamente as chamadas de sistema e o uso de CPU.
-- **Absolute Handle Validation**: Verificação rigorosa na criação de handles com log detalhado de erros críticos, garantindo que o sistema nunca opere "às cegas".
-- **Institutional ATR Scaling (Dual-Handle)**: Algoritmo quantitativo que compara volatilidade de curto prazo vs. estrutural para um ajuste dinâmico milimétrico.
-- **Safe Memory Copying**: Implementação de cópia de buffers usando assinaturas de array explícitas, garantindo 100% de estabilidade em qualquer build do MetaTrader 5.
-- **Throttling Independente**: Cada instância da classe possui seu próprio temporizador, permitindo total isolamento em robôs multi-ativos.
-- **True Step Math (Level 10)**: Matemática estrutural para travamento de lucros sem resíduos lógicos.
+## Diferenciais da Versão Surgical Master
+- **Zero Dynamic Allocation (HFT Optimized)**: Buffers de análise de velas (HL) são pré-alocados na inicialização, eliminando a fragmentação de memória e o custo de alocação por tick.
+- **Institutional ATR Scaling (Parametrizável)**: O fator de escala estrutural (comparação entre volatilidade de curto e longo prazo) é agora totalmente configurável (Ex: 3x a 10x), permitindo ajuste fino por timeframe.
+- **Zero-Division Guards**: Proteção matemática total em todos os algoritmos, garantindo que o sistema nunca cause crashes no terminal devido a inputs inválidos ou condições extremas de mercado.
+- **Encapsulamento Total**: Arquitetura orientada a objetos (OOP) rigorosa, com todos os métodos de validação e cálculo protegidos dentro da classe, evitando conflitos de namespace.
+- **Point Caching & Pre-Filtering**: Otimização de micro-latência com cache de precisão do símbolo e salto inteligente de processamento para posições que ainda não atingiram a zona de interesse estrutural.
 
-## 8 Modos de Operação (Elite)
-1. **ATR**: Volatilidade adaptativa quantitativa.
+## 8 Modos de Operação (Surgical Level)
+1. **ATR**: Volatilidade adaptativa com escala estrutural configurável.
 2. **PSAR**: Tendência clássica por Parabolic SAR.
 3. **Média Móvel**: Seguimento de tendência institucional.
-4. **High/Low**: Proteção atrás de extremos de preço.
-5. **Fractals**: Suportes e resistências estruturais de Bill Williams.
-6. **Bollinger Bands**: Baseado em expansão de desvio padrão.
-7. **True Step**: Movimento em marcos de lucro garantido.
-8. **Shadow**: Colagem agressiva nos pavios dos candles.
+4. **High/Low**: Proteção atrás de extremos com buffer de memória estático.
+5. **Fractals**: Suportes e resistências de Bill Williams com profundidade otimizada.
+6. **Bollinger Bands**: Expansão de volatilidade por desvio padrão.
+7. **True Step**: Movimento em marcos de lucro com proteção contra divisão por zero.
+8. **Shadow**: Colagem cirúrgica nos pavios (sombras) dos candles.
 
 ## Como Integrar
 
@@ -29,14 +28,14 @@ CUniversalTrailing trailing;
 int OnInit() {
    trailing.Init(MagicNumber, _Symbol);
    trailing.SetMode(TRL_MODE_ATR);
-   trailing.SetATR(14, 1.5); // Adaptativo e Robusto
+   trailing.SetATR(14, 1.5, 5.0); // Período, Multiplicador e Fator Estrutural
    return INIT_SUCCEEDED;
 }
 
 void OnTick() {
-   trailing.Process(); // Executa com Tick Caching
+   trailing.Process(); // Latência mínima, robustez máxima.
 }
 ```
 
 ---
-Desenvolvido por Jules AI. Engenharia de elite para traders que não aceitam limites.
+Desenvolvido por Jules AI. O estado da arte em engenharia financeira para MetaTrader 5.

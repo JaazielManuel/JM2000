@@ -5,7 +5,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2024, Jules AI"
 #property link      "https://www.mql5.com"
-#property version   "3.00"
+#property version   "4.00"
 #property strict
 
 #include <../Include/UniversalTrailing.mqh>
@@ -26,6 +26,7 @@ input ENUM_TRAILING_MODE InpMode = TRL_MODE_ATR; // Algoritmo Principal
 input group "== CONFIGURAÇÃO ATR =="
 input int    InpATRPeriod = 14;         // Período ATR
 input double InpATRMult   = 1.5;        // Multiplicador de Volatilidade
+input double InpATRFactor = 5.0;        // Fator Estrutural (Escala de Médio Prazo)
 
 input group "== CONFIGURAÇÃO PSAR =="
 input double InpPSARStep = 0.02;        // Passo (Step)
@@ -61,7 +62,7 @@ int OnInit()
    // Inicializa a biblioteca
    trailing.Init(InpMagic, _Symbol);
 
-   // Configurações Elite / Institutional+
+   // Configurações Cirúrgicas
    trailing.SetMaxSpread(InpMaxSpread);
    trailing.SetThrottle(InpThrottle);
    trailing.SetOnlyAboveEntry(InpOnlyAboveEntry);
@@ -72,7 +73,7 @@ int OnInit()
    // Inicializa os indicadores necessários baseados no modo escolhido
    switch(InpMode)
    {
-      case TRL_MODE_ATR:       trailing.SetATR(InpATRPeriod, InpATRMult); break;
+      case TRL_MODE_ATR:       trailing.SetATR(InpATRPeriod, InpATRMult, InpATRFactor); break;
       case TRL_MODE_PSAR:      trailing.SetPSAR(InpPSARStep, InpPSARMax); break;
       case TRL_MODE_MA:        trailing.SetMA(InpMAPeriod, 0, InpMAMethod, PRICE_CLOSE); break;
       case TRL_MODE_BOLLINGER: trailing.SetBollinger(InpBBPeriod, InpBBDev); break;
@@ -85,7 +86,7 @@ int OnInit()
    // Configura Breakeven independente do modo de trailing
    trailing.SetBreakeven(InpBEActivation, InpBELock);
 
-   Print("Smart Trailing EA ABSOLUTE MASTER inicializado com sucesso no ativo: ", _Symbol);
+   Print("Smart Trailing EA SURGICAL MASTER inicializado com sucesso no ativo: ", _Symbol);
    return(INIT_SUCCEEDED);
 }
 
