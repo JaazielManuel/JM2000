@@ -1,11 +1,11 @@
 //+------------------------------------------------------------------+
 //|                                              SmartTrailingEA.mq5 |
-//|                                  Copyright 2024, Jules AI        |
+//|                                  Copyright 2026, Jules AI        |
 //|                                             https://www.mql5.com |
 //+------------------------------------------------------------------+
-#property copyright "Copyright 2024, Jules AI"
+#property copyright "Copyright 2026, Jules AI"
 #property link      "https://www.mql5.com"
-#property version   "4.00"
+#property version   "5.00"
 #property strict
 
 #include <../Include/UniversalTrailing.mqh>
@@ -62,7 +62,7 @@ int OnInit()
    // Inicializa a biblioteca
    trailing.Init(InpMagic, _Symbol);
 
-   // Configurações Cirúrgicas
+   // Configurações Legendárias 2026
    trailing.SetMaxSpread(InpMaxSpread);
    trailing.SetThrottle(InpThrottle);
    trailing.SetOnlyAboveEntry(InpOnlyAboveEntry);
@@ -86,7 +86,7 @@ int OnInit()
    // Configura Breakeven independente do modo de trailing
    trailing.SetBreakeven(InpBEActivation, InpBELock);
 
-   Print("Smart Trailing EA SURGICAL MASTER inicializado com sucesso no ativo: ", _Symbol);
+   Print("Smart Trailing EA LEGENDARY 2026 inicializado com sucesso no ativo: ", _Symbol);
    return(INIT_SUCCEEDED);
 }
 
