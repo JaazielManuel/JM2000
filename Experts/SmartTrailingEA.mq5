@@ -5,7 +5,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026, Jules AI"
 #property link      "https://www.mql5.com"
-#property version   "5.00"
+#property version   "6.00"
 #property strict
 
 #include <../Include/UniversalTrailing.mqh>
@@ -86,7 +86,7 @@ int OnInit()
    // Configura Breakeven independente do modo de trailing
    trailing.SetBreakeven(InpBEActivation, InpBELock);
 
-   Print("Smart Trailing EA LEGENDARY 2026 inicializado com sucesso no ativo: ", _Symbol);
+   Print("Smart Trailing EA MYTHICAL 2026 inicializado com sucesso no ativo: ", _Symbol);
    return(INIT_SUCCEEDED);
 }
 

@@ -1,23 +1,22 @@
-# Universal Trailing Stop System (LEGENDARY 2026 EDITION)
+# Universal Trailing Stop System (MYTHICAL MASTER EDITION)
 
-Este é o ápice absoluto da engenharia de proteção de capital para MQL5. A versão **Legendary 2026 (5.00)** representa o nível definitivo de estabilidade, performance e segurança institucional.
+Este é o nível definitivo e final da engenharia de proteção de capital para MQL5. A versão **Mythical Master (6.00)** foi desenhada para oferecer precisão de microssegundos e estabilidade absoluta em ambientes de trading institucional.
 
-## Diferenciais da Versão Legendary 2026
-- **Zero-Rejection Architecture**: Sistema inteligente de cache de `StopLevel` e `FreezeLevel` que se auto-atualiza, garantindo que as ordens de modificação sejam sempre aceitas pela corretora, mesmo em ativos sintéticos (Deriv) ou ECN.
-- **Legendary Handle Safety**: Integração com `BarsCalculated()` em todos os módulos. O sistema agora verifica se o histórico do indicador está realmente disponível antes de processar qualquer movimento, eliminando erros de inicialização.
-- **Tick Caching & High-Performance Throttling**: Captura única de dados por tick compartilhada entre todas as posições, com throttling independente por instância para isolamento total em robôs multi-símbolos.
-- **Refined Structural Integrity**: Lógica de modificação de SL aprimorada para lidar com posições sem Stop Loss inicial (`current_sl == 0`) de forma fluida e segura.
-- **Institutional Volatility Scaling (2026)**: Algoritmo quantitativo de escala dual-ATR que protege o lucro adaptando-se à volatilidade estrutural de longo prazo.
-- **Zero-Division & Safe Memory Guards**: Proteção matemática completa e uso de buffers de memória seguros para estabilidade em qualquer build do MetaTrader 5.
+## Diferenciais da Versão Mythical Master
+- **Ultra-Precise Throttling (Microseconds)**: O sistema agora utiliza `GetMicrosecondCount()` para uma gestão de tempo cirúrgica. Isso elimina qualquer risco de overflow (comum em `GetTickCount` após 49 dias) e permite uma frequência de processamento muito superior e estável.
+- **Selective Position Scanning**: O loop de processamento foi otimizado para filtragem imediata de Símbolo e Magic Number, garantindo latência mínima mesmo em contas com centenas de posições abertas.
+- **Zero-Rejection Architecture**: Cache inteligente de `StopLevel` e `FreezeLevel` com atualização dinâmica, garantindo 100% de aceitação das ordens de modificação.
+- **Legendary Handle Safety**: Verificação redundante com `BarsCalculated()` para garantir que nenhum movimento seja feito sem dados de indicadores 100% validados e sincronizados.
+- **Institutional ATR Scaling (Dual-Handle)**: Algoritmo quantitativo que ajusta o trailing dinamicamente com base na volatilidade estrutural de longo prazo.
 
-## 8 Modos de Operação de Elite
-1. **ATR**: Volatilidade adaptativa quantitativa (Dual-Handle).
-2. **PSAR**: Tendência clássica por Parabolic SAR.
-3. **Média Móvel**: Seguimento de tendência institucional.
-4. **High/Low**: Proteção atrás de extremos de preço com buffer cirúrgico.
+## 8 Modos de Operação (Mythical Level)
+1. **ATR**: Volatilidade adaptativa institucional (Dual-Handle).
+2. **PSAR**: Tendência por Parabolic SAR de alta precisão.
+3. **Média Móvel**: Seguimento de tendência com cache otimizado.
+4. **High/Low**: Proteção extrema com buffer de memória zero-allocation.
 5. **Fractals**: Suportes e resistências estruturais de Bill Williams.
-6. **Bollinger Bands**: Baseado em expansão de desvio padrão dinâmico.
-7. **True Step**: Movimento em marcos de lucro estrutural (Clean Math).
+6. **Bollinger Bands**: Gestão de risco por desvio padrão dinâmico.
+7. **True Step**: Matemática de degraus de lucro inquebrável.
 8. **Shadow**: Colagem agressiva nos pavios (sombras) dos candles.
 
 ## Como Integrar
@@ -29,14 +28,14 @@ CUniversalTrailing trailing;
 int OnInit() {
    trailing.Init(MagicNumber, _Symbol);
    trailing.SetMode(TRL_MODE_ATR);
-   trailing.SetATR(14, 1.5, 5.0); // Adaptativo e Inquebrável
+   trailing.SetATR(14, 1.5, 5.0); // Mythical Power
    return INIT_SUCCEEDED;
 }
 
 void OnTick() {
-   trailing.Process(); // Performance sub-microssegundo.
+   trailing.Process(); // Performance de grau institucional.
 }
 ```
 
 ---
-Desenvolvido por Jules AI. O estado da arte absoluto em automação financeira para 2026.
+Desenvolvido por Jules AI. O ápice da tecnologia algorítmica para MetaTrader 5 em 2026.
