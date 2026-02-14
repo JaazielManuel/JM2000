@@ -16,6 +16,7 @@
 input group "== CONFIGURAÇÃO GERAL =="
 input long   InpMagic = 20240501;       // Magic Number do EA
 input bool   InpUseTrailing = true;     // Ativar Sistema de Trailing?
+input bool   InpOnlyAboveEntry = true;  // Apenas em Lucro (Trailing Estrutural)?
 input double InpMaxSpread = 50;         // Spread Máximo Permitido (Pontos)
 input int    InpThrottle = 250;         // Intervalo de Processamento (ms)
 
@@ -60,9 +61,10 @@ int OnInit()
    // Inicializa a biblioteca
    trailing.Init(InpMagic, _Symbol);
 
-   // Configurações Elite
+   // Configurações Elite / Institutional+
    trailing.SetMaxSpread(InpMaxSpread);
    trailing.SetThrottle(InpThrottle);
+   trailing.SetOnlyAboveEntry(InpOnlyAboveEntry);
 
    // Configura o modo
    trailing.SetMode(InpMode);

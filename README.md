@@ -1,43 +1,43 @@
-# Universal Trailing Stop System (ELITE PRO)
+# Universal Trailing Stop System (INSTITUTIONAL+)
 
-Este é um sistema de Trailing Stop institucional para MQL5, desenvolvido para ser extremamente robusto, inteligente e adaptável a qualquer corretora (incluindo ECN e Deriv).
+Este é um sistema de Trailing Stop definitivo para MQL5, desenhado para traders profissionais e desenvolvedores que buscam a máxima performance e robustez em qualquer ativo (Forex, Índices, Criptos e Sintéticos da Deriv).
 
-## Diferenciais da Versão Elite
-- **Ajuste Dinâmico de Volatilidade (ATR)**: O multiplicador se adapta automaticamente em expansões de mercado, evitando stops prematuros.
-- **Filtro de Spread**: Proteção contra spikes artificiais de spread que poderiam ativar o trailing inadequadamente.
-- **Performance de Alta Frequência**: Sistema de *Throttling* integrado que reduz o consumo de CPU e chamadas redundantes a buffers de indicadores.
-- **True Step Trailing**: Diferente do trailing comum, o modo Step agora move o Stop Loss em blocos fixos de lucro garantido.
-- **Integridade Direcional**: Garantia matemática de que o Stop Loss nunca retrocederá e sempre respeitará a distância mínima de segurança.
+## Diferenciais da Versão Institutional+
+- **Ajuste Dinâmico de Volatilidade (ATR)**: Multiplicador inteligente que expande e contrai com o mercado.
+- **Filtro de Spread**: Evita ativações falsas em momentos de baixa liquidez ou spikes de notícias.
+- **Micro-otimizações de Elite**: Cache de tipos, otimização de buffers de indicadores (Fractals) e redução de chamadas API redundantes.
+- **Trailing Stop Estrutural**: Opção para permitir o movimento do Stop apenas quando a posição já está em lucro (Break-even estrutural).
+- **High-Frequency Throttling**: Processamento controlado em milissegundos para evitar sobrecarga de CPU.
+- **True Step Trailing**: Trava o lucro em blocos fixos (milestones) de preço.
+- **Proteção Deriv/ECN**: Validação dupla de `StopLevel` e `FreezeLevel` com margem de segurança de 1 point.
 
 ## 8 Modos de Operação
-1. **ATR**: Baseado na volatilidade quantitativa.
-2. **PSAR**: Segue o indicador Parabolic SAR.
-3. **Média Móvel**: Trailing por tendência.
-4. **High/Low**: Baseado nas máximas/mínimas de velas anteriores.
-5. **Fractals**: Suportes e resistências confirmados.
-6. **Bollinger Bands**: Volatilidade por desvio padrão.
-7. **True Step**: Movimento em degraus de lucro.
-8. **Shadow**: Colagem agressiva na sombra da vela anterior.
+1. **ATR**: Volatilidade adaptativa quantitativa.
+2. **PSAR**: Tendência clássica por Parabolic SAR.
+3. **Média Móvel**: Seguimento de tendência por MA.
+4. **High/Low**: Proteção atrás de máximas e mínimas de candles recentes.
+5. **Fractals**: Suportes e resistências confirmados por Bill Williams.
+6. **Bollinger Bands**: Baseado em desvio padrão e volatilidade.
+7. **True Step**: Movimento em degraus estruturais de lucro.
+8. **Shadow**: Colagem agressiva na "sombra" (pavios) da vela anterior.
 
-## Como Usar
+## Como Integrar em 3 Passos
 
-1. Copie `UniversalTrailing.mqh` para a pasta `Include`.
-2. No seu EA:
+1. Copie `UniversalTrailing.mqh` para sua pasta `Include`.
+2. Inclua e declare no seu EA:
    ```cpp
    #include <UniversalTrailing.mqh>
    CUniversalTrailing trailing;
+   ```
+3. Inicialize e Processe:
+   ```cpp
+   // No OnInit
+   trailing.Init(MagicNumber, _Symbol);
+   trailing.SetMode(TRL_MODE_ATR);
 
-   int OnInit() {
-      trailing.Init(MagicNumber, _Symbol);
-      trailing.SetMode(TRL_MODE_ATR);
-      trailing.SetMaxSpread(50); // Proteção contra spread alto
-      return INIT_SUCCEEDED;
-   }
-
-   void OnTick() {
-      trailing.Process();
-   }
+   // No OnTick
+   trailing.Process();
    ```
 
 ---
-Desenvolvido por Jules AI. Focado em robustez institucional e alta performance.
+Desenvolvido por Jules AI. Focado em engenharia de software de alta performance para o mercado financeiro.

@@ -12,14 +12,15 @@
 #include <Trade\SymbolInfo.mqh>
 
 /*
-   SISTEMA DE TRAILING STOP UNIVERSAL INTELIGENTE (ELITE VERSION)
+   SISTEMA DE TRAILING STOP UNIVERSAL INTELIGENTE (INSTITUTIONAL+ VERSION)
 
    Esta versão inclui:
    - Ajuste dinâmico de volatilidade (ATR)
    - Filtro de Spread institucional
-   - Performance otimizada com Throttling (evita CopyBuffer redundante)
+   - Performance otimizada com Throttling e Micro-otimizações (Cache de tipos)
    - Lógica de "True Step" (movimento em blocos)
    - Proteção rigorosa de Stop/Freeze levels (ideal para Deriv/Sintéticos)
+   - Trailing estrutural (apenas move após o preço de abertura)
 */
 
 enum ENUM_TRAILING_MODE
@@ -46,12 +47,12 @@ private:
    string         m_symbol_name;
 
    // Performance & Throttling
-   datetime       m_last_process_time;
    int            m_throttle_ms;
 
    // Parâmetros Gerais
    ENUM_TRAILING_MODE m_mode;
-   double         m_max_spread;     // Filtro de spread em pontos
+   double         m_max_spread;
+   bool           m_only_above_entry; // Trailing apenas acima/abaixo do preço de entrada
 
    // ATR
    int            m_atr_period;
@@ -82,8 +83,8 @@ private:
    int            m_fractal_handle;
 
    // Step
-   double         m_step_size;      // Tamanho do degrau (Points)
-   double         m_step_min_profit; // Lucro mínimo para iniciar (Points)
+   double         m_step_size;
+   double         m_step_min_profit;
 
    // Breakeven
    double         m_be_activation;
@@ -112,6 +113,7 @@ public:
    void           SetMode(ENUM_TRAILING_MODE mode) { m_mode = mode; }
    void           SetMaxSpread(double max_spread_pts) { m_max_spread = max_spread_pts; }
    void           SetThrottle(int ms) { m_throttle_ms = ms; }
+   void           SetOnlyAboveEntry(bool only) { m_only_above_entry = only; }
 
    void           SetATR(int period, double multiplier);
    void           SetPSAR(double step, double max);
@@ -138,8 +140,8 @@ CUniversalTrailing::CUniversalTrailing() :
    m_bb_handle(INVALID_HANDLE),
    m_fractal_handle(INVALID_HANDLE),
    m_max_spread(0),
-   m_last_process_time(0),
-   m_throttle_ms(250) // Default: 4 vezes por segundo
+   m_throttle_ms(250),
+   m_only_above_entry(true) // Padrão robusto: apenas move após o lucro
 {
    m_be_activation = 0;
    m_be_profit = 0;
@@ -259,28 +261,30 @@ void CUniversalTrailing::Process()
       {
          if(m_position.Magic() == m_magic && m_position.Symbol() == m_symbol_name)
          {
+            // Micro-otimização: Cache de propriedades da posição
+            ENUM_POSITION_TYPE type = m_position.PositionType();
             double current_sl = m_position.StopLoss();
             double open_price = m_position.PriceOpen();
             double bid = m_symbol.Bid();
             double ask = m_symbol.Ask();
-            double current_price = (m_position.PositionType() == POSITION_TYPE_BUY) ? bid : ask;
+            double current_price = (type == POSITION_TYPE_BUY) ? bid : ask;
             double new_sl = 0;
 
             // 1. Breakeven Check
             if(m_be_activation > 0)
             {
-               double profit_points = (m_position.PositionType() == POSITION_TYPE_BUY) ?
+               double profit_points = (type == POSITION_TYPE_BUY) ?
                                       (bid - open_price) / m_symbol.Point() :
                                       (open_price - ask) / m_symbol.Point();
 
                if(profit_points >= m_be_activation)
                {
-                  double be_price = (m_position.PositionType() == POSITION_TYPE_BUY) ?
+                  double be_price = (type == POSITION_TYPE_BUY) ?
                                     open_price + (m_be_profit * m_symbol.Point()) :
                                     open_price - (m_be_profit * m_symbol.Point());
 
                   bool can_be = false;
-                  if(m_position.PositionType() == POSITION_TYPE_BUY)
+                  if(type == POSITION_TYPE_BUY)
                   {
                      if(current_sl < be_price) can_be = true;
                   }
@@ -289,7 +293,7 @@ void CUniversalTrailing::Process()
                      if(current_sl > be_price || current_sl == 0) can_be = true;
                   }
 
-                  if(can_be && IsStopLevelOk(current_price, be_price, m_position.PositionType()))
+                  if(can_be && IsStopLevelOk(current_price, be_price, type))
                   {
                      ModifySL(m_position.Ticket(), be_price);
                      continue;
@@ -307,15 +311,14 @@ void CUniversalTrailing::Process()
                      double atr = GetATRValue(1);
                      if(atr > 0)
                      {
-                        // Inteligência Quant: Ajuste de volatilidade relativa
                         double atr_slow = GetATRValue(10);
                         double vol_factor = (atr_slow > 0) ? (atr / atr_slow) : 1.0;
-                        if(vol_factor > 1.25) vol_factor = 1.25; // Limitador
+                        if(vol_factor > 1.25) vol_factor = 1.25;
                         if(vol_factor < 0.8) vol_factor = 0.8;
 
                         double dynamic_multiplier = m_atr_multiplier * vol_factor;
 
-                        new_sl = (m_position.PositionType() == POSITION_TYPE_BUY) ?
+                        new_sl = (type == POSITION_TYPE_BUY) ?
                                  bid - (atr * dynamic_multiplier) :
                                  ask + (atr * dynamic_multiplier);
                      }
@@ -331,19 +334,19 @@ void CUniversalTrailing::Process()
                   break;
 
                case TRL_MODE_HL:
-                  new_sl = GetHLValue(m_position.PositionType(), m_hl_candles);
+                  new_sl = GetHLValue(type, m_hl_candles);
                   break;
 
                case TRL_MODE_FRACTALS:
-                  new_sl = GetFractalValue(m_position.PositionType(), 2);
+                  new_sl = GetFractalValue(type, 2);
                   break;
 
                case TRL_MODE_BOLLINGER:
-                  new_sl = GetBollingerValue(m_position.PositionType(), 1);
+                  new_sl = GetBollingerValue(type, 1);
                   break;
 
                case TRL_MODE_SHADOW:
-                  new_sl = GetShadowValue(m_position.PositionType(), 1);
+                  new_sl = GetShadowValue(type, 1);
                   break;
 
                case TRL_MODE_STEP:
@@ -351,14 +354,12 @@ void CUniversalTrailing::Process()
                      double step_pts = m_step_size * m_symbol.Point();
                      double min_prof = m_step_min_profit * m_symbol.Point();
 
-                     if(m_position.PositionType() == POSITION_TYPE_BUY)
+                     if(type == POSITION_TYPE_BUY)
                      {
                         if(bid - open_price > min_prof)
                         {
-                           // True Step: Move em blocos
                            double blocks = MathFloor((bid - open_price) / step_pts);
                            new_sl = open_price + (blocks * step_pts) - step_pts;
-                           // O -step_pts mantém o fôlego mas trava o lucro do bloco anterior
                         }
                      }
                      else
@@ -373,24 +374,29 @@ void CUniversalTrailing::Process()
                   break;
             }
 
+            // Filtro Estrutural de Entrada (Opcional - Robusto)
+            if(m_only_above_entry && new_sl > 0)
+            {
+               if(type == POSITION_TYPE_BUY && new_sl <= open_price) new_sl = 0;
+               if(type == POSITION_TYPE_SELL && new_sl >= open_price) new_sl = 0;
+            }
+
             // Validação de Direção e Melhoria
             if(new_sl > 0)
             {
                new_sl = m_symbol.NormalizePrice(new_sl);
 
                bool should_modify = false;
-               if(m_position.PositionType() == POSITION_TYPE_BUY)
+               if(type == POSITION_TYPE_BUY)
                {
-                  // Apenas sobe o SL e garante que está abaixo do preço atual
                   if(new_sl > current_sl + (m_symbol.Point() * 2) && new_sl < bid) should_modify = true;
                }
                else
                {
-                  // Apenas desce o SL e garante que está acima do preço atual
                   if((new_sl < current_sl - (m_symbol.Point() * 2) || current_sl == 0) && new_sl > ask) should_modify = true;
                }
 
-               if(should_modify && IsStopLevelOk(current_price, new_sl, m_position.PositionType()))
+               if(should_modify && IsStopLevelOk(current_price, new_sl, type))
                {
                   ModifySL(m_position.Ticket(), new_sl);
                }
@@ -476,9 +482,12 @@ double CUniversalTrailing::GetFractalValue(ENUM_POSITION_TYPE type, int index)
    double buffer[];
    ArraySetAsSeries(buffer, true);
    int buffer_idx = (type == POSITION_TYPE_BUY) ? 1 : 0;
-   if(CopyBuffer(m_fractal_handle, buffer_idx, 0, 100, buffer) > 0)
+
+   // Otimização: Copia apenas 30 barras em vez de 100
+   if(CopyBuffer(m_fractal_handle, buffer_idx, 0, 30, buffer) > 0)
    {
-      for(int i = index; i < 100; i++)
+      int limit = ArraySize(buffer);
+      for(int i = index; i < limit; i++)
          if(buffer[i] != EMPTY_VALUE && buffer[i] > 0) return buffer[i];
    }
    return 0;
@@ -522,7 +531,7 @@ bool CUniversalTrailing::ModifySL(long ticket, double new_sl)
 bool CUniversalTrailing::IsStopLevelOk(double price, double sl, ENUM_POSITION_TYPE type)
 {
    int stop_level = (int)SymbolInfoInteger(m_symbol_name, SYMBOL_TRADE_STOPS_LEVEL);
-   double freeze_level = (double)SymbolInfoInteger(m_symbol_name, SYMBOL_TRADE_FREEZE_LEVEL);
+   int freeze_level = (int)SymbolInfoInteger(m_symbol_name, SYMBOL_TRADE_FREEZE_LEVEL);
    double min_dist = (stop_level > freeze_level ? stop_level : freeze_level) * m_symbol.Point();
    min_dist += m_symbol.Point();
 
