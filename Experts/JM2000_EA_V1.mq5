@@ -4,8 +4,8 @@
 //|                                          https://neuraltrade.ai  |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026"
-#property version   "2.1"
-#property description "JM2000 EA V1 - Integrated with Mythical Master Trailing (2026 Edition)"
+#property version   "2.2"
+#property description "JM2000 EA V1 - Omni-Adaptive Master Integration (2026 Edition)"
 
 #include <../Include/UniversalTrailing.mqh>
 
@@ -23,6 +23,8 @@ input group "== TRAILING MASTER 2026 =="
 input bool   InpUseAdvancedTrailing = true;      // Ativar Trailing Master?
 input ENUM_TRAILING_MODE InpTrailingMode = TRL_MODE_ATR; // Modo de Trailing
 input bool   InpOnlyInProfit = true;             // Trailing Estrutural (Apenas Lucro)
+input bool   InpAdaptiveScaling = true;          // Auto-Escala (Sintéticos/Crypto)?
+input bool   InpClusterMode = true;              // Modo Cluster (Unificar SL)?
 input double InpMaxSpreadAllowed = 50;           // Spread Máximo para Trailing (pts)
 input int    InpThrottleMS = 200;                // Throttle de Processamento (ms)
 
@@ -244,12 +246,16 @@ int OnInit() {
    trailing.SetThrottle(InpThrottleMS);
    trailing.SetMaxSpread(InpMaxSpreadAllowed);
    trailing.SetOnlyAboveEntry(InpOnlyInProfit);
+   trailing.SetAdaptiveScaling(InpAdaptiveScaling);
+   trailing.SetClusterMode(InpClusterMode);
 
-   // Configurações Específicas antes de ativar o modo
+   // Configurações Específicas (Surgical Setup)
    trailing.SetATR(InpATRPeriod, InpATRMultiplier, InpATRStructuralFactor);
    trailing.SetPSAR(InpPSARStep, InpPSARMax);
    trailing.SetMA(InpMAPeriod, 0, MODE_SMA, PRICE_CLOSE);
    trailing.SetHL(InpHLCount);
+   trailing.SetBollinger(20, 2.0);
+   trailing.SetFractals();
    trailing.SetStep(InpStepSizePts, InpStepMinProfitPts);
    trailing.SetBreakeven(InpBEActivationPts, InpBELockProfitPts);
 

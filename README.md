@@ -1,37 +1,41 @@
-# Universal Trailing Stop System (MYTHICAL MASTER V6.1 - 2026)
+# Universal Trailing Stop System (OMNI-ADAPTIVE MASTER v7.0)
 
-Este é o ápice da engenharia de proteção de capital para MQL5. A versão **v6.1 (2026 Edition)** foi refinada para atingir o nível máximo de performance e segurança institucional, eliminando gargalos de latência e garantindo 100% de aceitação de ordens.
+Esta é a versão definitiva e mais otimizada da engenharia de proteção de capital para MQL5. A versão **v7.0 Omni-Adaptive (2026)** foi projetada para resolver problemas de performance em ambientes multi-ativos e garantir a adaptação automática a qualquer classe de ativo (Forex, Crypto, Índices e Sintéticos).
 
-## Diferenciais da Versão v6.1
-- **Diagnostic Master Engine**: Agora o sistema emite logs cirúrgicos quando um Stop Loss é modificado, indicando o ticket e o algoritmo responsável.
-- **Legendary Handle Safety**: Integração profunda com `BarsCalculated()`. O sistema aguarda a sincronização completa do histórico antes de processar qualquer cálculo, evitando "sinais fantasmas".
-- **Zero-Rejection Architecture**: Cache inteligente de `StopLevel` e `FreezeLevel` com atualização dinâmica (a cada 10s), pre-validando cada modificação para evitar o erro 10016.
-- **Ultra-Precise Throttling**: Gestão de tempo baseada em `GetMicrosecondCount()`, ideal para ativos de alta volatilidade e ambientes HFT.
-- **Institutional Dual-ATR Scaling**: Algoritmo quantitativo que ajusta o trailing comparando a volatilidade de curto prazo vs. estrutural de longo prazo.
+## Diferenciais da Versão v7.0
+- **Omni-Caching Engine**: Preços (Máximas e Mínimas) e indicadores são cacheados uma única vez por tick cluster, eliminando redundantemente chamadas pesadas ao terminal (HFT Ready).
+- **Asset Auto-Scaling**: Detecta automaticamente o valor nominal do ativo e escala todos os parâmetros de pontos (Step, Distâncias, BE). Resolvido o problema de "não se adaptar" a ativos como BTCUSD ou Volatility 75 (Deriv).
+- **Cluster Mode (Unified SL)**: Permite que todas as ordens de uma pirâmide ou grid sejam movidas para o mesmo Stop Loss "mestre", otimizando o gerenciamento de risco do grupo.
+- **HFT Optimized Scanning**: O loop de posições agora usa seleção por ticket e filtragem imediata, sendo capaz de processar centenas de posições com latência desprezível.
+- **Trend-Aligned Validation**: PSAR, MA e Bollinger agora possuem lógica de alinhamento de tendência, impedindo movimentos do SL quando o indicador sugere que o preço está na zona contrária.
 
-## 8 Modos de Operação (Mythical Level)
-1. **ATR**: Volatilidade adaptativa institucional (Dual-Handle).
-2. **PSAR**: Tendência por Parabolic SAR de alta precisão.
-3. **Média Móvel**: Seguimento de tendência institucional.
-4. **High/Low**: Proteção extrema com buffer de memória estático.
-5. **Fractals**: Suportes e resistências estruturais de Bill Williams.
-6. **Bollinger Bands**: Gestão de risco por desvio padrão dinâmico.
-7. **True Step**: Matemática de degraus de lucro inquebrável.
-8. **Shadow**: Colagem agressiva nos pavios (sombras) dos candles.
+## 8 Modos de Operação (Omni-Adaptive)
+1. **ATR**: Volatilidade adaptativa quantitativa (Dual-Handle).
+2. **PSAR**: Tendência clássica por Parabolic SAR (Validado).
+3. **Média Móvel**: Seguimento de tendência institucional (Validado).
+4. **High/Low**: Proteção estrutural por extremos (Cached).
+5. **Fractals**: Suportes e resistências de Bill Williams (Lazy Init).
+6. **Bollinger Bands**: Gestão de risco por desvio padrão.
+7. **True Step**: Movimento em marcos de lucro com escala automática.
+8. **Shadow**: Colagem cirúrgica nos pavios (sombras) dos candles (v7.0).
 
-## Guia de Integração (JM2000 EA)
+## Como Integrar (v7.0)
 
-O JM2000 EA já vem com a integração v6.1 de fábrica.
-Para utilizar em outros projetos:
+```cpp
+#include <UniversalTrailing.mqh>
+CUniversalTrailing trailing;
 
-1. **Include**: `#include <UniversalTrailing.mqh>`
-2. **Init**: No `OnInit`, chame `Init(Magic, Symbol)` seguido das configurações (ATR, PSAR, etc) e por fim `SetMode`.
-3. **Process**: No `OnTick`, chame `Process()`.
+int OnInit() {
+   trailing.Init(MagicNumber, _Symbol);
+   trailing.SetAdaptiveScaling(true); // Auto-adaptação para Deriv/Crypto
+   trailing.SetMode(TRL_MODE_ATR);
+   return INIT_SUCCEEDED;
+}
 
-## Solução de Problemas (FAQ)
-- **O Trailing não move?** Verifique se `OnlyAboveEntry` está ativado. Se sim, o trailing só inicia quando a posição está em lucro maior que o calculado.
-- **Logs vazios?** Certifique-se de que o `MagicNumber` passado no `Init()` é exatamente o mesmo das ordens abertas.
-- **Data not ready?** Em backtests rápidos ou símbolos novos, o MT5 pode demorar a carregar o histórico. O sistema avisará no log.
+void OnTick() {
+   trailing.Process(); // Engine de alta performance com Omni-Caching.
+}
+```
 
 ---
-Desenvolvido por Jules AI. O estado da arte absoluto em automação financeira para 2026.
+Desenvolvido por Jules AI. Engenharia cirúrgica para traders profissionais em 2026.
