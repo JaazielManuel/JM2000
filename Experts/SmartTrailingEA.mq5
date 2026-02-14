@@ -5,7 +5,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2024, Jules AI"
 #property link      "https://www.mql5.com"
-#property version   "1.00"
+#property version   "1.10"
 #property strict
 
 #include <../Include/UniversalTrailing.mqh>
@@ -14,38 +14,40 @@
 //| PARÂMETROS DE ENTRADA                                            |
 //+------------------------------------------------------------------+
 input group "== CONFIGURAÇÃO GERAL =="
-input long   InpMagic = 20240501;    // Magic Number do EA
-input bool   InpUseTrailing = true;  // Ativar Sistema de Trailing?
+input long   InpMagic = 20240501;       // Magic Number do EA
+input bool   InpUseTrailing = true;     // Ativar Sistema de Trailing?
+input double InpMaxSpread = 50;         // Spread Máximo Permitido (Pontos)
+input int    InpThrottle = 250;         // Intervalo de Processamento (ms)
 
 input group "== MODO DE OPERAÇÃO =="
 input ENUM_TRAILING_MODE InpMode = TRL_MODE_ATR; // Algoritmo Principal
 
 input group "== CONFIGURAÇÃO ATR =="
-input int    InpATRPeriod = 14;      // Período ATR
-input double InpATRMult   = 1.5;     // Multiplicador de Volatilidade
+input int    InpATRPeriod = 14;         // Período ATR
+input double InpATRMult   = 1.5;        // Multiplicador de Volatilidade
 
 input group "== CONFIGURAÇÃO PSAR =="
-input double InpPSARStep = 0.02;     // Passo (Step)
-input double InpPSARMax  = 0.2;      // Máximo (Maximum)
+input double InpPSARStep = 0.02;        // Passo (Step)
+input double InpPSARMax  = 0.2;         // Máximo (Maximum)
 
 input group "== CONFIGURAÇÃO MÉDIA MÓVEL =="
-input int    InpMAPeriod = 20;       // Período MA
+input int    InpMAPeriod = 20;          // Período MA
 input ENUM_MA_METHOD InpMAMethod = MODE_SMA; // Método MA
 
 input group "== CONFIGURAÇÃO BOLLINGER =="
-input int    InpBBPeriod = 20;       // Período BB
-input double InpBBDev    = 2.0;      // Desvio BB
+input int    InpBBPeriod = 20;          // Período BB
+input double InpBBDev    = 2.0;         // Desvio BB
 
 input group "== CONFIGURAÇÃO HIGH/LOW / SHADOW =="
-input int    InpCandleCount = 3;     // Qtd de velas para busca
+input int    InpCandleCount = 3;        // Qtd de velas para busca
 
-input group "== CONFIGURAÇÃO STEP (DEGRAU) =="
-input double InpStepPoints = 200;    // Distância do Preço (Pontos)
-input double InpStepMinProfit = 50;  // Lucro Mínimo para iniciar (Pontos)
+input group "== CONFIGURAÇÃO STEP (TRUE STEP) =="
+input double InpStepSize = 100;         // Tamanho do Degrau (Pontos)
+input double InpStepMinProfit = 50;     // Lucro Mínimo para iniciar (Pontos)
 
 input group "== CONFIGURAÇÃO BREAKEVEN =="
-input double InpBEActivation = 150;  // Ativar BE ao atingir (Pontos)
-input double InpBELock = 20;         // Lucro Garantido no BE (Pontos)
+input double InpBEActivation = 150;     // Ativar BE ao atingir (Pontos)
+input double InpBELock = 20;            // Lucro Garantido no BE (Pontos)
 
 //--- VARIÁVEIS GLOBAIS
 CUniversalTrailing trailing;
@@ -58,6 +60,10 @@ int OnInit()
    // Inicializa a biblioteca
    trailing.Init(InpMagic, _Symbol);
 
+   // Configurações Elite
+   trailing.SetMaxSpread(InpMaxSpread);
+   trailing.SetThrottle(InpThrottle);
+
    // Configura o modo
    trailing.SetMode(InpMode);
 
@@ -69,15 +75,15 @@ int OnInit()
       case TRL_MODE_MA:        trailing.SetMA(InpMAPeriod, 0, InpMAMethod, PRICE_CLOSE); break;
       case TRL_MODE_BOLLINGER: trailing.SetBollinger(InpBBPeriod, InpBBDev); break;
       case TRL_MODE_HL:        trailing.SetHL(InpCandleCount); break;
-      case TRL_MODE_SHADOW:    trailing.SetHL(InpCandleCount); break; // Usa HL logic internamente
+      case TRL_MODE_SHADOW:    trailing.SetHL(InpCandleCount); break;
       case TRL_MODE_FRACTALS:  trailing.SetFractals(); break;
-      case TRL_MODE_STEP:      trailing.SetStep(InpStepPoints, InpStepMinProfit); break;
+      case TRL_MODE_STEP:      trailing.SetStep(InpStepSize, InpStepMinProfit); break;
    }
 
    // Configura Breakeven independente do modo de trailing
    trailing.SetBreakeven(InpBEActivation, InpBELock);
 
-   Print("Smart Trailing EA inicializado com sucesso no ativo: ", _Symbol);
+   Print("Smart Trailing EA ELITE inicializado com sucesso no ativo: ", _Symbol);
    return(INIT_SUCCEEDED);
 }
 
@@ -94,7 +100,7 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick()
 {
-   // Executa o processamento do trailing em cada tick
+   // Executa o processamento do trailing
    if(InpUseTrailing)
    {
       trailing.Process();
