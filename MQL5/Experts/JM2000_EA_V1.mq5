@@ -96,8 +96,8 @@ PositionTracker positions[];
 datetime lastBuyOrderCreation  = 0;
 datetime lastSellOrderCreation = 0;
 datetime lastOrderUpdateTime   = 0;
-long     lastBuyModifyTick     = 0;
-long     lastSellModifyTick    = 0;
+ulong    lastBuyModifyTick     = 0;
+ulong    lastSellModifyTick    = 0;
 
 //--- Variáveis de controle do broker
 int stopsLevel           = 0;
@@ -340,6 +340,20 @@ void SyncPendingOrders()
    for(int i = ArraySize(sellStopTickets) - 1; i >= 0; i--)
       if(!OrderSelect(sellStopTickets[i]))
          RemoveArrayElement(sellStopTickets, i);
+}
+
+//+------------------------------------------------------------------+
+//| Seleciona uma ordem pendente ativa pelo ticket                   |
+//+------------------------------------------------------------------+
+bool OrderSelect(ulong ticket)
+{
+   if(ticket <= 0) return false;
+   for(int i = 0; i < OrdersTotal(); i++)
+   {
+      ulong t = OrderGetTicket(i);
+      if(t == ticket) return true;
+   }
+   return false;
 }
 
 //+------------------------------------------------------------------+
@@ -732,7 +746,7 @@ bool ModifyPendingOrder(ulong ticket, double newPrice, double newSL)
    if(!OrderSelect(ticket)) return false;
 
    double currentPrice = OrderGetDouble(ORDER_PRICE_OPEN);
-   double currentSL    = OrderGetDouble(ORDER_PRICE_SL);
+   double currentSL    = OrderGetDouble(ORDER_SL);
 
    // Verifica se houve mudança significativa para evitar spam de modificações
    if(MathAbs(newPrice - currentPrice) < cachedPoint * 0.1 &&
@@ -955,7 +969,7 @@ void ManageContinuousPendingOrders()
 void ManageBuyStops(double lotSize, int updateThreshold, datetime currentTime)
 {
    int currentCount = ArraySize(buyStopTickets);
-   long currentTick = GetTickCount64();
+   ulong currentTick = GetTickCount64();
 
    // 1. Manter Frequência: Adiciona ordens se faltarem
    if(currentCount < InitialOrdersCount)
@@ -1012,7 +1026,7 @@ void ManageBuyStops(double lotSize, int updateThreshold, datetime currentTime)
 void ManageSellStops(double lotSize, int updateThreshold, datetime currentTime)
 {
    int currentCount = ArraySize(sellStopTickets);
-   long currentTick = GetTickCount64();
+   ulong currentTick = GetTickCount64();
 
    // 1. Manter Frequência: Adiciona ordens se faltarem
    if(currentCount < InitialOrdersCount)
