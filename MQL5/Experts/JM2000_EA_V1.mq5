@@ -99,6 +99,11 @@ datetime lastOrderUpdateTime   = 0;
 ulong    lastBuyModifyTick     = 0;
 ulong    lastSellModifyTick    = 0;
 
+//--- Variáveis para Lógica de Reversão Instantânea
+double   lastExitPrice         = 0;
+bool     forceBuyReposition    = false;
+bool     forceSellReposition   = false;
+
 //--- Variáveis de controle do broker
 int stopsLevel           = 0;
 int freezeLevel          = 0;
@@ -170,6 +175,7 @@ bool     ModifyPendingOrder(ulong ticket, double newPrice, double newSL);
 void     ApplyIndividualTrailing();
 void     ApplyDirectionalTrailing();
 void     ApplyGlobalTrailing();
+void     RepositionGridImmediately(bool isBuy, double targetPrice);
 
 //+------------------------------------------------------------------+
 //| Remove elemento do array                                         |
@@ -302,6 +308,18 @@ void OnTick()
 
    if(!IsMarketConditionSafe()) return;
 
+   // ✅ Lógica de Reversão Instantânea (Prioridade Máxima)
+   if(forceBuyReposition)
+   {
+      RepositionGridImmediately(true, lastExitPrice);
+      forceBuyReposition = false;
+   }
+   if(forceSellReposition)
+   {
+      RepositionGridImmediately(false, lastExitPrice);
+      forceSellReposition = false;
+   }
+
    // ✅ Sistema de trailing otimizado
    ApplyOptimizedTrailing();
 
@@ -318,6 +336,32 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
                         const MqlTradeRequest& request,
                         const MqlTradeResult& result)
 {
+   // Detecta fechamento de posições para Reversão Instantânea
+   if(trans.type == TRADE_TRANSACTION_DEAL_ADD)
+   {
+      if(HistoryDealSelect(trans.deal))
+      {
+         long magic = HistoryDealGetInteger(trans.deal, DEAL_MAGIC);
+         if(magic == MagicNumber)
+         {
+            long entry = HistoryDealGetInteger(trans.deal, DEAL_ENTRY);
+            if(entry == DEAL_ENTRY_OUT)
+            {
+               long type = HistoryDealGetInteger(trans.deal, DEAL_TYPE);
+               lastExitPrice = HistoryDealGetDouble(trans.deal, DEAL_PRICE);
+
+               // Se fechou uma COMPRA (DEAL_TYPE_SELL), movemos a grade de VENDA
+               // Se fechou uma VENDA (DEAL_TYPE_BUY), movemos a grade de COMPRA
+               if(type == DEAL_TYPE_SELL) forceSellReposition = true;
+               if(type == DEAL_TYPE_BUY)  forceBuyReposition  = true;
+
+               if(ShowChartInfo)
+                  Print("⚡ Reversão Detectada! Preço: ", DoubleToString(lastExitPrice, cachedDigits));
+            }
+         }
+      }
+   }
+
    if(trans.type == TRADE_TRANSACTION_ORDER_ADD ||
       trans.type == TRADE_TRANSACTION_ORDER_DELETE ||
       trans.type == TRADE_TRANSACTION_DEAL_ADD ||
@@ -760,6 +804,48 @@ bool ModifyPendingOrder(ulong ticket, double newPrice, double newSL)
 
    HandleTradeError(res.retcode);
    return false;
+}
+
+//+------------------------------------------------------------------+
+//| Reposiciona toda a grade imediatamente (Lógica de Reversão)      |
+//+------------------------------------------------------------------+
+void RepositionGridImmediately(bool isBuy, double targetPrice)
+{
+   ulong tickets[];
+   if(isBuy) ArrayCopy(tickets, buyStopTickets);
+   else      ArrayCopy(tickets, sellStopTickets);
+
+   int count = ArraySize(tickets);
+   if(count == 0) return;
+
+   if(ShowChartInfo)
+      Print("🚀 Reposicionando Grade ", isBuy ? "BUY" : "SELL", " para ", DoubleToString(targetPrice, cachedDigits));
+
+   for(int i = 0; i < count; i++)
+   {
+      // Calcula o novo preço baseado no alvo e no espaçamento da grade
+      double newPrice = 0;
+      if(isBuy)
+         newPrice = targetPrice + (i * SpacingPoints) * cachedPoint;
+      else
+         newPrice = targetPrice - (i * SpacingPoints) * cachedPoint;
+
+      // Ajuste de segurança para não ficar colado no preço atual (Stops Level)
+      double minP = GetValidPendingPrice(isBuy, 0);
+      if(isBuy) newPrice = MathMax(newPrice, minP);
+      else      newPrice = MathMin(newPrice, minP);
+
+      newPrice = NormalizeDouble(newPrice, cachedDigits);
+      double newSL = CalculateValidSL(newPrice, isBuy);
+
+      ModifyPendingOrder(tickets[i], newPrice, newSL);
+   }
+
+   // Atualiza os tickets globais e timestamps de modificação para evitar conflitos
+   if(isBuy) lastBuyModifyTick = GetTickCount64();
+   else      lastSellModifyTick = GetTickCount64();
+
+   SyncPendingOrders();
 }
 
 //+------------------------------------------------------------------+
