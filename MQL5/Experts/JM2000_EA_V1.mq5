@@ -177,6 +177,7 @@ void     ApplyDirectionalTrailing();
 void     ApplyGlobalTrailing();
 void     RepositionGridImmediately(bool isBuy, double targetPrice);
 void     SynchronizeClusterSL(bool isBuy);
+double   GetClusterSL(bool isBuy);
 
 //+------------------------------------------------------------------+
 //| Remove elemento do array                                         |
@@ -827,8 +828,16 @@ bool ModifyPendingOrder(ulong ticket, double newPrice, double newSL)
 void RepositionGridImmediately(bool isBuy, double targetPrice)
 {
    ulong tickets[];
-   if(isBuy) ArrayCopy(tickets, buyStopTickets);
-   else      ArrayCopy(tickets, sellStopTickets);
+   if(isBuy)
+   {
+      ArrayResize(tickets, ArraySize(buyStopTickets));
+      ArrayCopy(tickets, buyStopTickets);
+   }
+   else
+   {
+      ArrayResize(tickets, ArraySize(sellStopTickets));
+      ArrayCopy(tickets, sellStopTickets);
+   }
 
    int count = ArraySize(tickets);
    if(count == 0) return;
@@ -864,16 +873,13 @@ void RepositionGridImmediately(bool isBuy, double targetPrice)
 }
 
 //+------------------------------------------------------------------+
-//| Sincroniza o SL de todas as posições de um cluster               |
+//| Retorna o SL mais avançado de um cluster                         |
 //+------------------------------------------------------------------+
-void SynchronizeClusterSL(bool isBuy)
+double GetClusterSL(bool isBuy)
 {
-   UpdatePositionTracker(); // Garante que o tracker está atualizado
-
    double bestSL = 0;
    int sz = ArraySize(positions);
 
-   // 1. Encontra o SL mais "avançado" (mais alto para BUY, mais baixo para SELL)
    for(int i = 0; i < sz; i++)
    {
       if(positions[i].isBuy == isBuy)
@@ -887,9 +893,19 @@ void SynchronizeClusterSL(bool isBuy)
          }
       }
    }
+   return bestSL;
+}
 
+//+------------------------------------------------------------------+
+//| Sincroniza o SL de todas as posições de um cluster               |
+//+------------------------------------------------------------------+
+void SynchronizeClusterSL(bool isBuy)
+{
+   UpdatePositionTracker(); // Garante que o tracker está atualizado
+   double bestSL = GetClusterSL(isBuy);
    if(bestSL == 0) return;
 
+   int sz = ArraySize(positions);
    // 2. Aplica esse SL a todas as outras posições do mesmo grupo
    for(int i = 0; i < sz; i++)
    {
@@ -1126,16 +1142,30 @@ void ManageBuyStops(double lotSize, int updateThreshold, datetime currentTime)
       }
 
       double currentOrderPrice = OrderGetDouble(ORDER_PRICE_OPEN);
-      double idealLeadPrice    = GetValidPendingPrice(true, 0);
+      double idealLeadPrice    = GetClusterSL(false); // Tenta seguir SL de SELLs
+      bool   isFollowingSL     = (idealLeadPrice > 0);
 
-      // Lógica Assertiva: Buy Stop só acompanha se o preço CAIR (entrada mais barata)
-      if(idealLeadPrice < currentOrderPrice - updateThreshold * cachedPoint)
+      if(!isFollowingSL) idealLeadPrice = GetValidPendingPrice(true, 0);
+
+      // Se estiver seguindo SL, a sensibilidade é maior (1 ponto de diferença já move)
+      double threshold = isFollowingSL ? cachedPoint : updateThreshold * cachedPoint;
+
+      // Lógica Assertiva: Buy Stop acompanha se o preço CAIR (preço melhor)
+      // OU se estiver seguindo o SL de uma posição oposta (Reversão dinâmica)
+      if((!isFollowingSL && idealLeadPrice < currentOrderPrice - threshold) ||
+         (isFollowingSL && MathAbs(idealLeadPrice - currentOrderPrice) > threshold))
       {
          bool allModified = true;
          for(int i = 0; i < currentCount; i++)
          {
-            double newPrice = GetValidPendingPrice(true, (int)(i * SpacingPoints));
-            double newSL    = CalculateValidSL(newPrice, true);
+            double newPrice = isFollowingSL ? (idealLeadPrice + (i * SpacingPoints) * cachedPoint) : GetValidPendingPrice(true, (int)(i * SpacingPoints));
+
+            // Ajuste de segurança para Stops Level
+            double minP = GetValidPendingPrice(true, 0);
+            if(newPrice < minP) newPrice = minP;
+
+            newPrice = NormalizeDouble(newPrice, cachedDigits);
+            double newSL = CalculateValidSL(newPrice, true);
 
             if(!ModifyPendingOrder(buyStopTickets[i], newPrice, newSL))
                allModified = false;
@@ -1183,16 +1213,30 @@ void ManageSellStops(double lotSize, int updateThreshold, datetime currentTime)
       }
 
       double currentOrderPrice = OrderGetDouble(ORDER_PRICE_OPEN);
-      double idealLeadPrice    = GetValidPendingPrice(false, 0);
+      double idealLeadPrice    = GetClusterSL(true); // Tenta seguir SL de BUYs
+      bool   isFollowingSL     = (idealLeadPrice > 0);
 
-      // Lógica Assertiva: Sell Stop só acompanha se o preço SUBIR (entrada mais cara)
-      if(idealLeadPrice > currentOrderPrice + updateThreshold * cachedPoint)
+      if(!isFollowingSL) idealLeadPrice = GetValidPendingPrice(false, 0);
+
+      // Se estiver seguindo SL, a sensibilidade é maior (1 ponto de diferença já move)
+      double threshold = isFollowingSL ? cachedPoint : updateThreshold * cachedPoint;
+
+      // Lógica Assertiva: Sell Stop acompanha se o preço SUBIR (preço melhor)
+      // OU se estiver seguindo o SL de uma posição oposta (Reversão dinâmica)
+      if((!isFollowingSL && idealLeadPrice > currentOrderPrice + threshold) ||
+         (isFollowingSL && MathAbs(idealLeadPrice - currentOrderPrice) > threshold))
       {
          bool allModified = true;
          for(int i = 0; i < currentCount; i++)
          {
-            double newPrice = GetValidPendingPrice(false, (int)(i * SpacingPoints));
-            double newSL    = CalculateValidSL(newPrice, false);
+            double newPrice = isFollowingSL ? (idealLeadPrice - (i * SpacingPoints) * cachedPoint) : GetValidPendingPrice(false, (int)(i * SpacingPoints));
+
+            // Ajuste de segurança para Stops Level
+            double minP = GetValidPendingPrice(false, 0);
+            if(newPrice > minP) newPrice = minP;
+
+            newPrice = NormalizeDouble(newPrice, cachedDigits);
+            double newSL = CalculateValidSL(newPrice, false);
 
             if(!ModifyPendingOrder(sellStopTickets[i], newPrice, newSL))
                allModified = false;
