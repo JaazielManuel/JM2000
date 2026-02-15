@@ -261,8 +261,8 @@ int OnInit()
    maxVolume       = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
    stepVolume      = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
 
-   adjustedOffsetPoints    = MathMax(OffsetPoints,    stopsLevel + 2);
-   adjustedStopLossPoints  = MathMax(StopLossPoints,  stopsLevel + 2);
+   adjustedOffsetPoints    = MathMax(OffsetPoints,    stopsLevel + 10);
+   adjustedStopLossPoints  = MathMax(StopLossPoints,  stopsLevel + 10);
 
    ArrayResize(buyStopTickets,  0);
    ArrayResize(sellStopTickets, 0);
@@ -726,8 +726,8 @@ bool ClosePartialPosition(ulong ticket, double volume)
    string symbol = PositionGetString(POSITION_SYMBOL);
    long   type   = PositionGetInteger(POSITION_TYPE);
 
-   MqlTradeRequest req = {0};
-   MqlTradeResult  res = {0};
+   MqlTradeRequest req = {};
+   MqlTradeResult  res = {};
 
    req.action        = TRADE_ACTION_DEAL;
    req.position      = ticket;
@@ -772,8 +772,8 @@ bool ModifyPositionSL(ulong ticket, double newSL)
    // Evita modificações desnecessárias
    if(MathAbs(newSL - currentSL) < cachedPoint * 0.5) return false;
 
-   MqlTradeRequest req = {0};
-   MqlTradeResult  res = {0};
+   MqlTradeRequest req = {};
+   MqlTradeResult  res = {};
 
    req.action   = TRADE_ACTION_SLTP;
    req.position = ticket;
@@ -808,8 +808,8 @@ bool ModifyPendingOrder(ulong ticket, double newPrice, double newSL)
       MathAbs(newSL - currentSL) < cachedPoint * 0.1)
       return false;
 
-   MqlTradeRequest req = {0};
-   MqlTradeResult  res = {0};
+   MqlTradeRequest req = {};
+   MqlTradeResult  res = {};
 
    req.action = TRADE_ACTION_MODIFY;
    req.order  = ticket;
@@ -835,6 +835,7 @@ bool ModifyPendingOrder(ulong ticket, double newPrice, double newSL)
 //+------------------------------------------------------------------+
 void RepositionGridImmediately(bool isBuy, double targetPrice)
 {
+   UpdatePriceCache(); // Garante preços atualizados antes do reposicionamento
    ulong tickets[];
    if(isBuy)
    {
@@ -1282,8 +1283,8 @@ bool CreateBuyStops(double lotSize, int count)
       if(orderPrice <= cachedAsk) continue;
       if(orderSL <= 0 || orderSL >= orderPrice) continue;
 
-   MqlTradeRequest req = {0};
-   MqlTradeResult  res = {0};
+   MqlTradeRequest req = {};
+   MqlTradeResult  res = {};
 
       req.action        = TRADE_ACTION_PENDING;
       req.symbol        = _Symbol;
@@ -1339,8 +1340,8 @@ bool CreateSellStops(double lotSize, int count)
       if(orderPrice >= cachedBid) continue;
       if(orderSL <= orderPrice || orderSL <= 0) continue;
 
-      MqlTradeRequest req = {0};
-      MqlTradeResult  res = {0};
+      MqlTradeRequest req = {};
+      MqlTradeResult  res = {};
 
       req.action        = TRADE_ACTION_PENDING;
       req.symbol        = _Symbol;
@@ -1397,13 +1398,24 @@ double GetValidPendingPrice(bool isBuy, int additionalOffset = 0)
 //+------------------------------------------------------------------+
 double CalculateValidSL(double orderPrice, bool isBuy)
 {
-   int    minSL = MathMax(stopsLevel + 2, adjustedStopLossPoints);
+   int    minSL = MathMax(stopsLevel + 5, adjustedStopLossPoints);
    double dist  = minSL * cachedPoint;
+   double sl    = isBuy ? (orderPrice - dist) : (orderPrice + dist);
+
+   // Garantia adicional: o SL deve estar a uma distância segura do preço atual de mercado
+   double marketPrice = isBuy ? cachedBid : cachedAsk;
+   double minDistance = (stopsLevel + 5) * cachedPoint;
 
    if(isBuy)
-      return NormalizeDouble(orderPrice - dist, cachedDigits);
+   {
+      if(sl > marketPrice - minDistance) sl = marketPrice - minDistance;
+   }
    else
-      return NormalizeDouble(orderPrice + dist, cachedDigits);
+   {
+      if(sl < marketPrice + minDistance) sl = marketPrice + minDistance;
+   }
+
+   return NormalizeDouble(sl, cachedDigits);
 }
 
 //+------------------------------------------------------------------+
@@ -1412,14 +1424,15 @@ double CalculateValidSL(double orderPrice, bool isBuy)
 bool CanModifyOrder(ulong ticket)
 {
    if(!OrderSelect(ticket)) return false;
-   if(freezeLevel <= 0)     return true;
 
    double orderPrice = OrderGetDouble(ORDER_PRICE_OPEN);
    long   orderType  = OrderGetInteger(ORDER_TYPE);
    double refPrice   = (orderType == ORDER_TYPE_BUY_STOP) ? cachedAsk : cachedBid;
    double distance   = MathAbs(orderPrice - refPrice);
 
-   return (distance > (freezeLevel + 2) * cachedPoint);
+   // Aumentada margem de segurança para Freeze e Stops level
+   int safetyLimit = MathMax(freezeLevel, stopsLevel) + 5;
+   return (distance > safetyLimit * cachedPoint);
 }
 
 //+------------------------------------------------------------------+
@@ -1430,8 +1443,8 @@ bool CancelOrder(ulong ticket)
    if(ticket == 0) return false;
    if(!CanModifyOrder(ticket)) return false;
 
-   MqlTradeRequest req = {0};
-   MqlTradeResult  res = {0};
+   MqlTradeRequest req = {};
+   MqlTradeResult  res = {};
 
    req.action = TRADE_ACTION_REMOVE;
    req.order  = ticket;
@@ -1541,7 +1554,7 @@ void HandleTradeError(uint retcode)
       case TRADE_RETCODE_INVALID_PRICE: msg = "Preço de execução inválido"; break;
       case TRADE_RETCODE_NO_MONEY:      msg = "Margem insuficiente na conta"; break;
       case TRADE_RETCODE_LIMIT_ORDERS:  msg = "Limite máximo de ordens atingido"; break;
-      case TRADE_RETCODE_OFF_QUOTES:    msg = "Sem cotações no momento"; break;
+      case TRADE_RETCODE_NO_QUOTES:     msg = "Sem cotações no momento"; break;
       case TRADE_RETCODE_TOO_MANY_REQUESTS: msg = "Muitas requisições (Spam)"; break;
       default: msg = "Erro desconhecido (" + (string)retcode + ")"; break;
    }
