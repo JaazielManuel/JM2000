@@ -176,6 +176,7 @@ void     ApplyIndividualTrailing();
 void     ApplyDirectionalTrailing();
 void     ApplyGlobalTrailing();
 void     RepositionGridImmediately(bool isBuy, double targetPrice);
+void     SynchronizeClusterSL(bool isBuy);
 
 //+------------------------------------------------------------------+
 //| Remove elemento do array                                         |
@@ -290,7 +291,7 @@ int OnInit()
    Print("BreakEven: ",          BreakEvenPoints, " pts");
    Print("Ordens por Lado: ",    InitialOrdersCount);
    Print("Espaçamento: ",        SpacingPoints, " pts");
-   Print("Max Posições: ",       MaxPositions == 0 ? "ILIMITADO" : IntegerToString(MaxPositions));
+   Print("Max Posições: ",       MaxPositions == 0 ? "INFINITO (PIRÂMIDE ATIVA)" : IntegerToString(MaxPositions));
    Print("Hedging: ",            AllowHedging ? "SIM" : "NÃO");
    Print("═══════════════════════════════════════════════");
 
@@ -357,6 +358,18 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
 
                if(ShowChartInfo)
                   Print("⚡ Reversão Detectada! Preço: ", DoubleToString(lastExitPrice, cachedDigits));
+            }
+
+            // Detecta entrada na pirâmide para sincronizar SL
+            if(entry == DEAL_ENTRY_IN)
+            {
+               long type = HistoryDealGetInteger(trans.deal, DEAL_TYPE);
+               bool isBuy = (type == DEAL_TYPE_BUY);
+
+               if(ShowChartInfo)
+                  Print("🚀 Pirâmide: Nova posição ", isBuy?"BUY":"SELL", " aberta. Sincronizando cluster...");
+
+               SynchronizeClusterSL(isBuy);
             }
          }
       }
@@ -849,6 +862,48 @@ void RepositionGridImmediately(bool isBuy, double targetPrice)
 }
 
 //+------------------------------------------------------------------+
+//| Sincroniza o SL de todas as posições de um cluster               |
+//+------------------------------------------------------------------+
+void SynchronizeClusterSL(bool isBuy)
+{
+   UpdatePositionTracker(); // Garante que o tracker está atualizado
+
+   double bestSL = 0;
+   int sz = ArraySize(positions);
+
+   // 1. Encontra o SL mais "avançado" (mais alto para BUY, mais baixo para SELL)
+   for(int i = 0; i < sz; i++)
+   {
+      if(positions[i].isBuy == isBuy)
+      {
+         double pSL = positions[i].currentSL;
+         if(pSL > 0)
+         {
+            if(bestSL == 0) bestSL = pSL;
+            else if(isBuy && pSL > bestSL)  bestSL = pSL;
+            else if(!isBuy && pSL < bestSL) bestSL = pSL;
+         }
+      }
+   }
+
+   if(bestSL == 0) return;
+
+   // 2. Aplica esse SL a todas as outras posições do mesmo grupo
+   for(int i = 0; i < sz; i++)
+   {
+      if(positions[i].isBuy == isBuy)
+      {
+         // Só modifica se o SL atual for diferente ou inexistente
+         if(MathAbs(positions[i].currentSL - bestSL) > cachedPoint * 0.5)
+         {
+            if(ModifyPositionSL(positions[i].ticket, bestSL))
+               positions[i].currentSL = bestSL;
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
 //| Atualiza cache de preços                                         |
 //+------------------------------------------------------------------+
 void UpdatePriceCache()
@@ -977,6 +1032,7 @@ bool CanOpenMorePositions(bool isBuy)
    int buyCount, sellCount, totalCount;
    CountOpenPositions(buyCount, sellCount, totalCount);
 
+   // Se MaxPositions for 0, permitimos a pirâmide infinita baseada apenas na margem
    if(MaxPositions > 0 && totalCount >= MaxPositions)
       return false;
 
