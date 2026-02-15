@@ -62,7 +62,7 @@ input int    AvoidFirstMinutesSunday  = 10;    // Minutos após abrir o domingo 
 input group "=== INTERFACE E PERFORMANCE ==="
 input bool   ShowChartInfo      = true;   // Mostrar painel de informações no gráfico?
 input bool   UseAdaptiveUpdate  = true;   // Ajustar sensibilidade automaticamente?
-input int    RecreateDelaySeconds = 1;    // Tempo de espera para recriar ordens (segundos)
+input int    RecreateDelaySeconds = 0;    // Tempo de espera para recriar ordens (segundos)
 input int    ModificationCooldownMS = 500; // Intervalo mínimo entre modificações (ms)
 
 input group "=== CUSTOMIZAÇÃO VISUAL ==="
@@ -380,8 +380,10 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
       trans.type == TRADE_TRANSACTION_DEAL_ADD ||
       trans.type == TRADE_TRANSACTION_HISTORY_ADD)
    {
+      UpdatePriceCache();
       UpdatePositionTracker();
       SyncPendingOrders();
+      ManageContinuousPendingOrders();
    }
 }
 
@@ -1077,8 +1079,6 @@ void ManageContinuousPendingOrders()
 {
    datetime currentTime = TimeCurrent();
 
-   if(currentTime - lastOrderUpdateTime < 1) return;
-
    double tradeLot = CalculateDynamicLot();
 
    if(UseDynamicLot && !HasSufficientMargin(tradeLot * InitialOrdersCount))
@@ -1100,10 +1100,11 @@ void ManageBuyStops(double lotSize, int updateThreshold, datetime currentTime)
    int currentCount = ArraySize(buyStopTickets);
    ulong currentTick = GetTickCount64();
 
-   // 1. Manter Frequência: Adiciona ordens se faltarem
+   // 1. Manter Frequência: Adiciona ordens se faltarem (Resposta Ultra-Rápida)
    if(currentCount < InitialOrdersCount)
    {
-      if(currentTime - lastBuyOrderCreation >= RecreateDelaySeconds)
+      // Se faltam ordens, ignoramos o delay para preencher a grade imediatamente
+      if(currentCount == 0 || currentTime - lastBuyOrderCreation >= RecreateDelaySeconds)
       {
          if(CanOpenMorePositions(true))
          {
@@ -1157,10 +1158,11 @@ void ManageSellStops(double lotSize, int updateThreshold, datetime currentTime)
    int currentCount = ArraySize(sellStopTickets);
    ulong currentTick = GetTickCount64();
 
-   // 1. Manter Frequência: Adiciona ordens se faltarem
+   // 1. Manter Frequência: Adiciona ordens se faltarem (Resposta Ultra-Rápida)
    if(currentCount < InitialOrdersCount)
    {
-      if(currentTime - lastSellOrderCreation >= RecreateDelaySeconds)
+      // Se faltam ordens, ignoramos o delay para preencher a grade imediatamente
+      if(currentCount == 0 || currentTime - lastSellOrderCreation >= RecreateDelaySeconds)
       {
          if(CanOpenMorePositions(false))
          {
