@@ -342,19 +342,6 @@ void SyncPendingOrders()
          RemoveArrayElement(sellStopTickets, i);
 }
 
-//+------------------------------------------------------------------+
-//| Seleciona uma ordem pendente ativa pelo ticket                   |
-//+------------------------------------------------------------------+
-bool OrderSelect(ulong ticket)
-{
-   if(ticket <= 0) return false;
-   for(int i = 0; i < OrdersTotal(); i++)
-   {
-      ulong t = OrderGetTicket(i);
-      if(t == ticket) return true;
-   }
-   return false;
-}
 
 //+------------------------------------------------------------------+
 //| ✅ Atualiza tracker de posições                                  |
@@ -987,7 +974,7 @@ void ManageBuyStops(double lotSize, int updateThreshold, datetime currentTime)
    }
 
    // 2. Movimentação Inteligente: Modifica em vez de cancelar
-   if(currentCount > 0 && (currentTick - lastBuyModifyTick) >= ModificationCooldownMS)
+   if(currentCount > 0 && (currentTick - lastBuyModifyTick) >= (ulong)ModificationCooldownMS)
    {
       if(!OrderSelect(buyStopTickets[0]))
       {
@@ -1043,7 +1030,7 @@ void ManageSellStops(double lotSize, int updateThreshold, datetime currentTime)
    }
 
    // 2. Movimentação Inteligente: Modifica em vez de cancelar
-   if(currentCount > 0 && (currentTick - lastSellModifyTick) >= ModificationCooldownMS)
+   if(currentCount > 0 && (currentTick - lastSellModifyTick) >= (ulong)ModificationCooldownMS)
    {
       if(!OrderSelect(sellStopTickets[0]))
       {
