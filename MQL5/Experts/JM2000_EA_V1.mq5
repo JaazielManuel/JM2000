@@ -1554,7 +1554,6 @@ void HandleTradeError(uint retcode)
       case TRADE_RETCODE_INVALID_PRICE: msg = "Preço de execução inválido"; break;
       case TRADE_RETCODE_NO_MONEY:      msg = "Margem insuficiente na conta"; break;
       case TRADE_RETCODE_LIMIT_ORDERS:  msg = "Limite máximo de ordens atingido"; break;
-      case TRADE_RETCODE_NO_QUOTES:     msg = "Sem cotações no momento"; break;
       case TRADE_RETCODE_TOO_MANY_REQUESTS: msg = "Muitas requisições (Spam)"; break;
       default: msg = "Erro desconhecido (" + (string)retcode + ")"; break;
    }
