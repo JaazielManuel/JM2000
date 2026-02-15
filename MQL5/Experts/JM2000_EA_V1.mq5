@@ -240,6 +240,14 @@ int OnInit()
       return INIT_PARAMETERS_INCORRECT;
    }
 
+   // Verifica se o trading é permitido no símbolo
+   long tradeMode = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_MODE);
+   if(tradeMode == SYMBOL_TRADE_MODE_DISABLED)
+   {
+      Print("ERRO: Negociação desativada para este símbolo.");
+      return INIT_FAILED;
+   }
+
    // Cache de informações fixas do símbolo
    stopsLevel  = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
    freezeLevel = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL);
@@ -284,16 +292,16 @@ int OnInit()
    }
 
    Print("═══════════════════════════════════════════════");
-   Print(EA_NAME, " - TRAILING OTIMIZADO");
+   Print(EA_NAME, " - INICIALIZAÇÃO BEM SUCEDIDA");
    Print("═══════════════════════════════════════════════");
-   Print("Trailing Mode: ",      trailingModeStr);
-   Print("Trailing Stop: ",      TrailingStopPoints, " pts");
-   Print("Trailing Step: ",      TrailingStepPoints, " pts");
+   Print("Modo Trailing: ",      trailingModeStr);
+   Print("Distância Trail: ",    TrailingStopPoints, " pts");
+   Print("Passo Trail: ",       TrailingStepPoints, " pts");
    Print("BreakEven: ",          BreakEvenPoints, " pts");
    Print("Ordens por Lado: ",    InitialOrdersCount);
-   Print("Espaçamento: ",        SpacingPoints, " pts");
-   Print("Max Posições: ",       MaxPositions == 0 ? "INFINITO (PIRÂMIDE ATIVA)" : IntegerToString(MaxPositions));
-   Print("Hedging: ",            AllowHedging ? "SIM" : "NÃO");
+   Print("Espaçamento Grid: ",   SpacingPoints, " pts");
+   Print("Limite Posições: ",    MaxPositions == 0 ? "INFINITO (PIRÂMIDE ATIVA)" : IntegerToString(MaxPositions));
+   Print("Permitir Hedging: ",   AllowHedging ? "SIM" : "NÃO");
    Print("═══════════════════════════════════════════════");
 
    return INIT_SUCCEEDED;
@@ -718,8 +726,8 @@ bool ClosePartialPosition(ulong ticket, double volume)
    string symbol = PositionGetString(POSITION_SYMBOL);
    long   type   = PositionGetInteger(POSITION_TYPE);
 
-   MqlTradeRequest req = {};
-   MqlTradeResult  res = {};
+   MqlTradeRequest req = {0};
+   MqlTradeResult  res = {0};
 
    req.action        = TRADE_ACTION_DEAL;
    req.position      = ticket;
@@ -764,8 +772,8 @@ bool ModifyPositionSL(ulong ticket, double newSL)
    // Evita modificações desnecessárias
    if(MathAbs(newSL - currentSL) < cachedPoint * 0.5) return false;
 
-   MqlTradeRequest req = {};
-   MqlTradeResult  res = {};
+   MqlTradeRequest req = {0};
+   MqlTradeResult  res = {0};
 
    req.action   = TRADE_ACTION_SLTP;
    req.position = ticket;
@@ -800,8 +808,8 @@ bool ModifyPendingOrder(ulong ticket, double newPrice, double newSL)
       MathAbs(newSL - currentSL) < cachedPoint * 0.1)
       return false;
 
-   MqlTradeRequest req = {};
-   MqlTradeResult  res = {};
+   MqlTradeRequest req = {0};
+   MqlTradeResult  res = {0};
 
    req.action = TRADE_ACTION_MODIFY;
    req.order  = ticket;
@@ -941,6 +949,9 @@ void UpdateATRCache()
 
    if(handleATR == INVALID_HANDLE) return;
 
+   // Verifica se os dados do indicador estão calculados e disponíveis
+   if(BarsCalculated(handleATR) < 14) return;
+
    double atrBuffer[1];
    if(CopyBuffer(handleATR, 0, 0, 1, atrBuffer) > 0)
    {
@@ -1076,9 +1087,11 @@ int GetAdaptiveUpdatePoints()
 {
    if(!UseAdaptiveUpdate) return UpdatePoints;
 
+   if(cachedPoint <= 0) return UpdatePoints;
+
    // Elasticidade inteligente: combina volatilidade (ATR) e custo operacional (Spread)
    // Multiplicador de 0.3 no ATR permite capturar movimentos estruturais ignorando ruído
-   double atrFactor    = (cachedATR > 0 && cachedPoint > 0) ? (cachedATR / cachedPoint * 0.3) : 0;
+   double atrFactor    = (cachedATR > 0) ? (cachedATR / cachedPoint * 0.3) : 0;
    // Spread x 2.0 garante que não moveremos ordens por uma distância menor que o custo de transação
    double spreadFactor = cachedSpread * 2.0;
 
@@ -1174,7 +1187,7 @@ void ManageBuyStops(double lotSize, int updateThreshold, datetime currentTime)
          if(allModified)
          {
             lastBuyModifyTick = currentTick;
-            if(ShowChartInfo) Print("🔄 Grade BUY otimizada para baixo (Preço melhor)");
+            if(ShowChartInfo) Print("🔄 Grade COMPRA otimizada (Preço melhor)");
          }
       }
    }
@@ -1245,7 +1258,7 @@ void ManageSellStops(double lotSize, int updateThreshold, datetime currentTime)
          if(allModified)
          {
             lastSellModifyTick = currentTick;
-            if(ShowChartInfo) Print("🔄 Grade SELL otimizada para cima (Preço melhor)");
+            if(ShowChartInfo) Print("🔄 Grade VENDA otimizada (Preço melhor)");
          }
       }
    }
@@ -1269,8 +1282,8 @@ bool CreateBuyStops(double lotSize, int count)
       if(orderPrice <= cachedAsk) continue;
       if(orderSL <= 0 || orderSL >= orderPrice) continue;
 
-      MqlTradeRequest req = {};
-      MqlTradeResult  res = {};
+   MqlTradeRequest req = {0};
+   MqlTradeResult  res = {0};
 
       req.action        = TRADE_ACTION_PENDING;
       req.symbol        = _Symbol;
@@ -1326,8 +1339,8 @@ bool CreateSellStops(double lotSize, int count)
       if(orderPrice >= cachedBid) continue;
       if(orderSL <= orderPrice || orderSL <= 0) continue;
 
-      MqlTradeRequest req = {};
-      MqlTradeResult  res = {};
+      MqlTradeRequest req = {0};
+      MqlTradeResult  res = {0};
 
       req.action        = TRADE_ACTION_PENDING;
       req.symbol        = _Symbol;
@@ -1417,8 +1430,8 @@ bool CancelOrder(ulong ticket)
    if(ticket == 0) return false;
    if(!CanModifyOrder(ticket)) return false;
 
-   MqlTradeRequest req = {};
-   MqlTradeResult  res = {};
+   MqlTradeRequest req = {0};
+   MqlTradeResult  res = {0};
 
    req.action = TRADE_ACTION_REMOVE;
    req.order  = ticket;
@@ -1460,15 +1473,13 @@ double CalculateDynamicLot()
    double baseValue      = MathMin(accountBalance, accountEquity);
 
    double riskAmount    = baseValue * (RiskPercent / 100.0);
-   double pointValue    = (cachedTickSize > 0)
+   double pointValue    = (cachedTickSize > 0 && cachedTickValue > 0)
                           ? (cachedTickValue / cachedTickSize) * cachedPoint
                           : cachedPoint * 10;
 
-   if(pointValue <= 0) return Lots;
+   if(pointValue <= 0 || adjustedStopLossPoints <= 0) return Lots;
 
-   double calculatedLot = (adjustedStopLossPoints > 0)
-                          ? riskAmount / (adjustedStopLossPoints * pointValue)
-                          : Lots;
+   double calculatedLot = riskAmount / (adjustedStopLossPoints * pointValue);
 
    calculatedLot = MathMin(calculatedLot, MaxLotSize);
 
@@ -1515,19 +1526,28 @@ double NormalizeVolume(double volume)
 void HandleTradeError(uint retcode)
 {
    consecutiveErrors++;
+   int lastErr = GetLastError();
 
    if(!ShowChartInfo) return;
+
+   string msg = "";
    switch(retcode)
    {
-      case TRADE_RETCODE_REQUOTE:       break;
-      case TRADE_RETCODE_PRICE_CHANGED: break;
-      case TRADE_RETCODE_REJECT:        Print("❌ Ordem rejeitada");          break;
-      case TRADE_RETCODE_INVALID_STOPS: Print("❌ Stops inválidos");          break;
-      case TRADE_RETCODE_FROZEN:        Print("❌ Freeze level");             break;
-      case TRADE_RETCODE_INVALID_PRICE: Print("❌ Preço inválido");           break;
-      case TRADE_RETCODE_NO_MONEY:      Print("❌ Margem insuficiente");      break;
-      case TRADE_RETCODE_LIMIT_ORDERS:  Print("❌ Limite de ordens");         break;
+      case TRADE_RETCODE_REQUOTE:       msg = "Requote"; break;
+      case TRADE_RETCODE_PRICE_CHANGED: msg = "Preço alterado"; break;
+      case TRADE_RETCODE_REJECT:        msg = "Ordem rejeitada"; break;
+      case TRADE_RETCODE_INVALID_STOPS: msg = "Stops inválidos (Stops Level)"; break;
+      case TRADE_RETCODE_FROZEN:        msg = "Ativo congelado (Freeze Level)"; break;
+      case TRADE_RETCODE_INVALID_PRICE: msg = "Preço de execução inválido"; break;
+      case TRADE_RETCODE_NO_MONEY:      msg = "Margem insuficiente na conta"; break;
+      case TRADE_RETCODE_LIMIT_ORDERS:  msg = "Limite máximo de ordens atingido"; break;
+      case TRADE_RETCODE_OFF_QUOTES:    msg = "Sem cotações no momento"; break;
+      case TRADE_RETCODE_TOO_MANY_REQUESTS: msg = "Muitas requisições (Spam)"; break;
+      default: msg = "Erro desconhecido (" + (string)retcode + ")"; break;
    }
+
+   if(msg != "" && retcode != TRADE_RETCODE_REQUOTE && retcode != TRADE_RETCODE_PRICE_CHANGED)
+      PrintFormat("❌ Erro Trade: %s | Runtime: %d", msg, lastErr);
 }
 
 //+------------------------------------------------------------------+
@@ -1548,25 +1568,35 @@ void DisplayStatusInfo()
          totalProfit += PositionGetDouble(POSITION_PROFIT);
    }
 
-   string info = EA_NAME + "\n";
-   info += (safeModeActive) ? "🛑 MODO DE SEGURANÇA ATIVO" : "🔄 TRAILING ATIVO ";
+   double currentEquity = AccountInfoDouble(ACCOUNT_EQUITY);
+   double drawdown = (maxEquityReached > 0) ? ((maxEquityReached - currentEquity) / maxEquityReached) * 100.0 : 0;
+
+   string info = EA_NAME + " | v1.0\n";
+   info += "══════════════════════\n";
+   info += (safeModeActive) ? "🛑 MODO DE SEGURANÇA ATIVO" : "🔄 OPERAÇÃO NORMAL";
 
    if(!safeModeActive)
    {
+      info += "\nTrailing: ";
       switch(TrailingMode)
       {
-         case TRAILING_INDIVIDUAL:   info += "IND"; break;
-         case TRAILING_BY_DIRECTION: info += "DIR"; break;
-         case TRAILING_GLOBAL:       info += "GLB"; break;
+         case TRAILING_INDIVIDUAL:   info += "Individual"; break;
+         case TRAILING_BY_DIRECTION: info += "Direcional"; break;
+         case TRAILING_GLOBAL:       info += "Global"; break;
       }
 
-      StringAdd(info, "\n📊 Posições: ");
-      if(countTotal == 0) StringAdd(info, "0");
-      else StringAdd(info, StringFormat("%dB/%dS | $%.2f", countBuy, countSell, totalProfit));
+      StringAdd(info, StringFormat("\n📊 Posições: %dB / %dS", countBuy, countSell));
+      StringAdd(info, StringFormat("\n💰 Lucro Flutuante: $%.2f", totalProfit));
+      StringAdd(info, StringFormat("\n📉 Drawdown: %.2f%%", drawdown));
 
-      StringAdd(info, StringFormat("\n📋 Pendentes: %dB/%dS", ArraySize(buyStopTickets), ArraySize(sellStopTickets)));
-      StringAdd(info, StringFormat("\n📡 SP: %.1f", cachedSpread));
+      StringAdd(info, StringFormat("\n📋 Pendentes: %dB / %dS", ArraySize(buyStopTickets), ArraySize(sellStopTickets)));
+
+      double spreadLimit = (averageSpread > 0) ? averageSpread * MaxSpreadMultiplier : 0;
+      StringAdd(info, StringFormat("\n📡 Spread: %.1f (Limite: %.1f)", cachedSpread, spreadLimit));
+
+      StringAdd(info, StringFormat("\n🏦 Equity: $%.2f", currentEquity));
    }
+   info += "\n══════════════════════";
 
    Comment(info);
 
