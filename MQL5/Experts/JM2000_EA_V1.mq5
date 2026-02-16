@@ -105,7 +105,7 @@ bool     forceBuyReposition    = false;
 bool     forceSellReposition   = false;
 
 //--- Variáveis de Segurança Adaptativa
-int      dynamicSafetyPoints   = 20;    // Buffer extra que aumenta em erros
+int      dynamicSafetyPoints   = 5;     // Buffer extra reduzido para precisão
 datetime lastSafetyDecay       = 0;
 
 //--- Variáveis de controle do broker
@@ -822,13 +822,17 @@ bool ModifyPendingOrder(ulong ticket, double newPrice, double newSL)
 
    if(!IsPriceSafe(newPrice, isBuy, false) || !IsPriceSafe(newSL, isBuy, true))
    {
-      // Se não for seguro, forçamos um ajuste fino baseado nos novos buffers adaptativos
-      newPrice = isBuy ? (cachedAsk + (stopsLevel + dynamicSafetyPoints + cachedSpread + 10) * cachedPoint)
-                       : (cachedBid - (stopsLevel + dynamicSafetyPoints + cachedSpread + 10) * cachedPoint);
+      // Se não for seguro, forçamos um ajuste fino respeitando o floor mínimo
+      double safetyFloor = (stopsLevel + dynamicSafetyPoints + cachedSpread + 2) * cachedPoint;
+
+      if(isBuy)
+         newPrice = MathMax(newPrice, cachedAsk + safetyFloor);
+      else
+         newPrice = MathMin(newPrice, cachedBid - safetyFloor);
+
       newPrice = NormalizeDouble(newPrice, cachedDigits);
       newSL    = CalculateValidSL(newPrice, isBuy);
 
-      // Segunda verificação: se ainda não for seguro, abortamos para evitar rejeição
       if(!IsPriceSafe(newPrice, isBuy, false)) return false;
    }
 
@@ -984,18 +988,17 @@ void UpdatePriceCache()
    stopsLevel  = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
    freezeLevel = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL);
 
-   // Detecção de Mercado Volátil: se spread > 2x média, aumenta segurança
-   if(averageSpread > 0 && cachedSpread > averageSpread * 2.0)
+   // Detecção de Mercado Volátil: se spread > 3x média, aumenta segurança levemente
+   if(averageSpread > 0 && cachedSpread > averageSpread * 3.0)
    {
-      dynamicSafetyPoints += 2;
-      if(dynamicSafetyPoints > 200) dynamicSafetyPoints = 200;
+      if(dynamicSafetyPoints < 50) dynamicSafetyPoints += 1;
    }
 
-   // Decay lento da segurança adaptativa (reduz 1 ponto a cada 5 minutos)
+   // Decay da segurança adaptativa (reduz 1 ponto a cada 2 minutos para voltar à precisão rápido)
    datetime now = TimeCurrent();
-   if(now - lastSafetyDecay > 300)
+   if(now - lastSafetyDecay > 120)
    {
-      if(dynamicSafetyPoints > 20) dynamicSafetyPoints--;
+      if(dynamicSafetyPoints > 5) dynamicSafetyPoints--;
       lastSafetyDecay = now;
    }
 }
@@ -1472,16 +1475,19 @@ bool CreateSellStops(double lotSize, int count)
 //+------------------------------------------------------------------+
 double GetValidPendingPrice(bool isBuy, int additionalOffset = 0)
 {
-   // Multiplicador institucional ultra-seguro
-   double safetyBuffer = (stopsLevel > 0) ? (stopsLevel * 2.0) : 30;
-   safetyBuffer += dynamicSafetyPoints + cachedSpread + 20 + (additionalOffset > 0 ? additionalOffset : 0);
+   // Floor de segurança dinâmica: mínimo necessário para não ser rejeitado
+   double safetyFloor = stopsLevel + dynamicSafetyPoints + cachedSpread + 2;
 
-   double minDist = safetyBuffer * cachedPoint;
+   // Preferência total aos parâmetros do usuário
+   double userDist = OffsetPoints + additionalOffset;
+
+   // O preço final deve respeitar o maior entre o desejado e o floor de segurança
+   double finalDist = MathMax(userDist, safetyFloor) * cachedPoint;
 
    if(isBuy)
-      return NormalizeDouble(cachedAsk + minDist, cachedDigits);
+      return NormalizeDouble(cachedAsk + finalDist, cachedDigits);
    else
-      return NormalizeDouble(cachedBid - minDist, cachedDigits);
+      return NormalizeDouble(cachedBid - finalDist, cachedDigits);
 }
 
 //+------------------------------------------------------------------+
@@ -1489,26 +1495,28 @@ double GetValidPendingPrice(bool isBuy, int additionalOffset = 0)
 //+------------------------------------------------------------------+
 double CalculateValidSL(double orderPrice, bool isBuy)
 {
-   // Safety Buffer ultra-seguro
-   double safetyDist = ((stopsLevel > 0) ? stopsLevel * 2.0 : 30) + dynamicSafetyPoints + cachedSpread + 10;
-   double minSLPoints = MathMax(safetyDist, (double)StopLossPoints);
+   // Floor de segurança mínima para o SL
+   double safetyFloor = stopsLevel + dynamicSafetyPoints + 2;
 
-   double dist  = minSLPoints * cachedPoint;
-   double sl    = isBuy ? (orderPrice - dist) : (orderPrice + dist);
+   // Distância desejada pelo usuário
+   double userSL = (double)StopLossPoints;
 
-   // Garantia adicional: o SL deve estar a uma distância segura do preço atual de mercado (Bid/Ask)
+   double finalDistPoints = MathMax(userSL, safetyFloor);
+   double dist = finalDistPoints * cachedPoint;
+
+   double sl = isBuy ? (orderPrice - dist) : (orderPrice + dist);
+
+   // Ajuste fino: o SL deve estar a uma distância segura do preço atual (Bid/Ask)
    double marketPrice = isBuy ? cachedBid : cachedAsk;
-   double minMarketDistance = safetyDist * cachedPoint;
+   double minMarketDist = safetyFloor * cachedPoint;
 
    if(isBuy)
    {
-      // Para COMPRA, SL deve ser < Bid
-      if(sl > marketPrice - minMarketDistance) sl = marketPrice - minMarketDistance;
+      if(sl > marketPrice - minMarketDist) sl = marketPrice - minMarketDist;
    }
    else
    {
-      // Para VENDA, SL deve ser > Ask
-      if(sl < marketPrice + minMarketDistance) sl = marketPrice + minMarketDistance;
+      if(sl < marketPrice + minMarketDist) sl = marketPrice + minMarketDist;
    }
 
    return NormalizeDouble(sl, cachedDigits);
@@ -1637,11 +1645,11 @@ void HandleTradeError(uint retcode)
    consecutiveErrors++;
    int lastErr = GetLastError();
 
-   // Aumenta a segurança adaptativa se o erro for proximidade ao mercado ou stops inválidos
+   // Aumenta a segurança adaptativa levemente se o erro for proximidade ao mercado ou stops inválidos
    if(retcode == TRADE_RETCODE_INVALID_STOPS || retcode == TRADE_RETCODE_FROZEN || retcode == TRADE_RETCODE_INVALID_PRICE)
    {
-      dynamicSafetyPoints += 10;
-      if(ShowChartInfo) Print("🛡️ Segurança Adaptativa Reforçada: +", dynamicSafetyPoints, " pts");
+      if(dynamicSafetyPoints < 100) dynamicSafetyPoints += 5;
+      if(ShowChartInfo) Print("🛡️ Ajuste de Precisão: +", dynamicSafetyPoints, " pts");
    }
 
    if(!ShowChartInfo) return;
