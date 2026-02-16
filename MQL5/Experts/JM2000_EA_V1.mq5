@@ -63,7 +63,7 @@ input group "=== INTERFACE E PERFORMANCE ==="
 input bool   ShowChartInfo      = true;   // Mostrar painel de informações no gráfico?
 input bool   UseAdaptiveUpdate  = true;   // Ajustar sensibilidade automaticamente?
 input int    RecreateDelaySeconds = 0;    // Tempo de espera para recriar ordens (segundos)
-input int    ModificationCooldownMS = 500; // Intervalo mínimo entre modificações (ms)
+input int    ModificationCooldownMS = 1000; // Intervalo mínimo entre modificações (ms)
 
 input group "=== CUSTOMIZAÇÃO VISUAL ==="
 input bool   ApplyChartColors   = true;       // Aplicar as cores abaixo ao gráfico?
@@ -98,6 +98,10 @@ datetime lastSellOrderCreation = 0;
 datetime lastOrderUpdateTime   = 0;
 ulong    lastBuyModifyTick     = 0;
 ulong    lastSellModifyTick    = 0;
+
+//--- Variáveis para Controle de Mensagens (Trade Spam Prevention)
+ulong    lastGlobalRequestTick = 0;
+int      requestsInWindow      = 0;
 
 //--- Variáveis para Lógica de Reversão Instantânea
 double   lastExitPrice         = 0;
@@ -183,6 +187,7 @@ void     RepositionGridImmediately(bool isBuy, double targetPrice);
 void     SynchronizeClusterSL(bool isBuy);
 double   GetClusterSL(bool isBuy);
 bool     IsPriceSafe(double price, bool isBuy, bool isSL);
+bool     CanSendTradeRequest();
 
 //+------------------------------------------------------------------+
 //| Remove elemento do array                                         |
@@ -371,7 +376,7 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
                if(type == DEAL_TYPE_BUY)  forceBuyReposition  = true;
 
                if(ShowChartInfo)
-                  Print("⚡ Reversão Detectada! Preço: ", DoubleToString(lastExitPrice, cachedDigits));
+                  PrintFormat("⚡ Reversão @ %s", DoubleToString(lastExitPrice, cachedDigits));
             }
 
             // Detecta entrada na pirâmide para sincronizar SL
@@ -381,7 +386,7 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
                bool isBuy = (type == DEAL_TYPE_BUY);
 
                if(ShowChartInfo)
-                  Print("🚀 Pirâmide: Nova posição ", isBuy?"BUY":"SELL", " aberta. Sincronizando cluster...");
+                  PrintFormat("🚀 Pirâmide %s", isBuy?"COMPRA":"VENDA");
 
                SynchronizeClusterSL(isBuy);
             }
@@ -427,7 +432,7 @@ void UpdatePositionTracker()
       if(!PositionSelectByTicket(positions[i].ticket))
       {
          if(ShowChartInfo)
-            Print("📍 Posição #", positions[i].ticket, " fechada");
+            PrintFormat("📍 Posição #%d encerrada", positions[i].ticket);
          RemoveArrayElement(positions, i);
       }
    }
@@ -472,9 +477,7 @@ void UpdatePositionTracker()
             positions[sz].openTime       = (datetime)PositionGetInteger(POSITION_TIME);
 
             if(ShowChartInfo)
-               Print("📍 Nova posição #", ticket, " | ",
-                     positions[sz].isBuy ? "BUY" : "SELL",
-                     " | ", positions[sz].volume, " lots");
+               PrintFormat("📍 Nova posição #%d | %s | %.2f lots", ticket, positions[sz].isBuy ? "COMPRA" : "VENDA", positions[sz].volume);
          }
       }
    }
@@ -556,8 +559,7 @@ void ApplyIndividualTrailing()
                positions[i].currentSL = newSL;
 
                if(ShowChartInfo)
-                  Print("⚖️ BreakEven #", positions[i].ticket,
-                        " @ ", DoubleToString(newSL, cachedDigits));
+                  PrintFormat("⚖️ BreakEven #%d @ %s", positions[i].ticket, DoubleToString(newSL, cachedDigits));
 
                // Fechamento parcial
                if(UsePartialClose && !positions[i].partialClosed && PartialClosePercent > 0)
@@ -571,8 +573,7 @@ void ApplyIndividualTrailing()
                         positions[i].volume -= closeVolume;
 
                         if(ShowChartInfo)
-                           Print("📉 Fechamento parcial #", positions[i].ticket,
-                                 " | ", closeVolume, " lots");
+                  PrintFormat("📉 Parcial #%d | %.2f lots", positions[i].ticket, closeVolume);
                      }
                   }
                }
@@ -596,10 +597,6 @@ void ApplyIndividualTrailing()
             if(ModifyPositionSL(positions[i].ticket, newSL))
             {
                positions[i].currentSL = newSL;
-
-               if(ShowChartInfo)
-                  Print("📈 Trailing BUY #", positions[i].ticket,
-                        " | SL: ", DoubleToString(newSL, cachedDigits));
             }
          }
       }
@@ -613,10 +610,6 @@ void ApplyIndividualTrailing()
             if(ModifyPositionSL(positions[i].ticket, newSL))
             {
                positions[i].currentSL = newSL;
-
-               if(ShowChartInfo)
-                  Print("📉 Trailing SELL #", positions[i].ticket,
-                        " | SL: ", DoubleToString(newSL, cachedDigits));
             }
          }
       }
@@ -727,6 +720,7 @@ void ApplyGlobalTrailing()
 bool ClosePartialPosition(ulong ticket, double volume)
 {
    if(!PositionSelectByTicket(ticket)) return false;
+   if(!CanSendTradeRequest()) return false;
 
    string symbol = PositionGetString(POSITION_SYMBOL);
    long   type   = PositionGetInteger(POSITION_TYPE);
@@ -771,6 +765,7 @@ bool ClosePartialPosition(ulong ticket, double volume)
 bool ModifyPositionSL(ulong ticket, double newSL)
 {
    if(!PositionSelectByTicket(ticket)) return false;
+   if(!CanSendTradeRequest()) return false;
 
    double currentSL = PositionGetDouble(POSITION_SL);
 
@@ -804,13 +799,16 @@ bool ModifyPositionSL(ulong ticket, double newSL)
 bool ModifyPendingOrder(ulong ticket, double newPrice, double newSL)
 {
    if(!OrderSelect(ticket)) return false;
+   if(!CanSendTradeRequest()) return false;
 
    double currentPrice = OrderGetDouble(ORDER_PRICE_OPEN);
    double currentSL    = OrderGetDouble(ORDER_SL);
 
-   // Verifica se houve mudança significativa para evitar spam de modificações
-   if(MathAbs(newPrice - currentPrice) < cachedPoint * 0.1 &&
-      MathAbs(newSL - currentSL) < cachedPoint * 0.1)
+   // Verifica se houve mudança significativa (mínimo 1.0 ponto ou 20% do UpdatePoints)
+   double minChange = MathMax(1.0, GetAdaptiveUpdatePoints() * 0.2) * cachedPoint;
+
+   if(MathAbs(newPrice - currentPrice) < minChange &&
+      MathAbs(newSL - currentSL) < minChange)
       return false;
 
    MqlTradeRequest req = {};
@@ -1001,6 +999,27 @@ void UpdatePriceCache()
       if(dynamicSafetyPoints > 5) dynamicSafetyPoints--;
       lastSafetyDecay = now;
    }
+}
+
+//+------------------------------------------------------------------+
+//| Limita a frequência de mensagens para a corretora (Anti-Spam)    |
+//+------------------------------------------------------------------+
+bool CanSendTradeRequest()
+{
+   ulong currentTick = GetTickCount64();
+
+   // Se passou mais de 1 segundo desde a última janela, reseta o contador
+   if(currentTick - lastGlobalRequestTick > 1000)
+   {
+      lastGlobalRequestTick = currentTick;
+      requestsInWindow = 0;
+   }
+
+   // Se atingiu o limite de 3 requisições por segundo, bloqueia
+   if(requestsInWindow >= 3) return false;
+
+   requestsInWindow++;
+   return true;
 }
 
 //+------------------------------------------------------------------+
@@ -1252,15 +1271,15 @@ void ManageBuyStops(double lotSize, int updateThreshold, datetime currentTime)
 
       if(!isFollowingSL) idealLeadPrice = GetValidPendingPrice(true, 0);
 
-      // Se estiver seguindo SL, a sensibilidade é maior (1 ponto de diferença já move)
-      double threshold = isFollowingSL ? cachedPoint : updateThreshold * cachedPoint;
+      // Se estiver seguindo SL, a sensibilidade é moderada para evitar spam
+      double threshold = isFollowingSL ? MathMax(2.0, cachedSpread * 0.5) * cachedPoint : updateThreshold * cachedPoint;
 
       // Lógica Assertiva: Buy Stop acompanha se o preço CAIR (preço melhor)
       // OU se estiver seguindo o SL de uma posição oposta (Reversão dinâmica)
       if((!isFollowingSL && idealLeadPrice < currentOrderPrice - threshold) ||
          (isFollowingSL && MathAbs(idealLeadPrice - currentOrderPrice) > threshold))
       {
-         bool allModified = true;
+         int modifiedCount = 0;
          for(int i = 0; i < currentCount; i++)
          {
             double newPrice = isFollowingSL ? (idealLeadPrice + (i * SpacingPoints) * cachedPoint) : GetValidPendingPrice(true, (int)(i * SpacingPoints));
@@ -1272,14 +1291,14 @@ void ManageBuyStops(double lotSize, int updateThreshold, datetime currentTime)
             newPrice = NormalizeDouble(newPrice, cachedDigits);
             double newSL = CalculateValidSL(newPrice, true);
 
-            if(!ModifyPendingOrder(buyStopTickets[i], newPrice, newSL))
-               allModified = false;
+            if(ModifyPendingOrder(buyStopTickets[i], newPrice, newSL))
+               modifiedCount++;
          }
 
-         if(allModified)
+         if(modifiedCount > 0)
          {
             lastBuyModifyTick = currentTick;
-            if(ShowChartInfo) Print("🔄 Grade COMPRA otimizada (Preço melhor)");
+            if(ShowChartInfo) PrintFormat("🔄 Grade COMPRA: %d ordens movidas", modifiedCount);
          }
       }
    }
@@ -1323,15 +1342,15 @@ void ManageSellStops(double lotSize, int updateThreshold, datetime currentTime)
 
       if(!isFollowingSL) idealLeadPrice = GetValidPendingPrice(false, 0);
 
-      // Se estiver seguindo SL, a sensibilidade é maior (1 ponto de diferença já move)
-      double threshold = isFollowingSL ? cachedPoint : updateThreshold * cachedPoint;
+      // Se estiver seguindo SL, a sensibilidade é moderada para evitar spam
+      double threshold = isFollowingSL ? MathMax(2.0, cachedSpread * 0.5) * cachedPoint : updateThreshold * cachedPoint;
 
       // Lógica Assertiva: Sell Stop acompanha se o preço SUBIR (preço melhor)
       // OU se estiver seguindo o SL de uma posição oposta (Reversão dinâmica)
       if((!isFollowingSL && idealLeadPrice > currentOrderPrice + threshold) ||
          (isFollowingSL && MathAbs(idealLeadPrice - currentOrderPrice) > threshold))
       {
-         bool allModified = true;
+         int modifiedCount = 0;
          for(int i = 0; i < currentCount; i++)
          {
             double newPrice = isFollowingSL ? (idealLeadPrice - (i * SpacingPoints) * cachedPoint) : GetValidPendingPrice(false, (int)(i * SpacingPoints));
@@ -1343,14 +1362,14 @@ void ManageSellStops(double lotSize, int updateThreshold, datetime currentTime)
             newPrice = NormalizeDouble(newPrice, cachedDigits);
             double newSL = CalculateValidSL(newPrice, false);
 
-            if(!ModifyPendingOrder(sellStopTickets[i], newPrice, newSL))
-               allModified = false;
+            if(ModifyPendingOrder(sellStopTickets[i], newPrice, newSL))
+               modifiedCount++;
          }
 
-         if(allModified)
+         if(modifiedCount > 0)
          {
             lastSellModifyTick = currentTick;
-            if(ShowChartInfo) Print("🔄 Grade VENDA otimizada (Preço melhor)");
+            if(ShowChartInfo) PrintFormat("🔄 Grade VENDA: %d ordens movidas", modifiedCount);
          }
       }
    }
@@ -1362,6 +1381,7 @@ void ManageSellStops(double lotSize, int updateThreshold, datetime currentTime)
 bool CreateBuyStops(double lotSize, int count)
 {
    if(count < 1) return false;
+   if(!CanSendTradeRequest()) return false;
 
    int successCount = 0;
    int startIndex = ArraySize(buyStopTickets);
@@ -1399,7 +1419,7 @@ bool CreateBuyStops(double lotSize, int count)
          successCount++;
          consecutiveErrors = 0;
 
-         if(ShowChartInfo) Print("➕ Buy Stop #", res.order, " adicionada à grade (Pos: ", sz, ")");
+         if(ShowChartInfo) PrintFormat("➕ Grade COMPRA #%d", res.order);
       }
       else
       {
@@ -1419,6 +1439,7 @@ bool CreateBuyStops(double lotSize, int count)
 bool CreateSellStops(double lotSize, int count)
 {
    if(count < 1) return false;
+   if(!CanSendTradeRequest()) return false;
 
    int successCount = 0;
    int startIndex = ArraySize(sellStopTickets);
@@ -1456,7 +1477,7 @@ bool CreateSellStops(double lotSize, int count)
          successCount++;
          consecutiveErrors = 0;
 
-         if(ShowChartInfo) Print("➕ Sell Stop #", res.order, " adicionada à grade (Pos: ", sz, ")");
+         if(ShowChartInfo) PrintFormat("➕ Grade VENDA #%d", res.order);
       }
       else
       {
@@ -1546,6 +1567,7 @@ bool CancelOrder(ulong ticket)
 {
    if(ticket == 0) return false;
    if(!CanModifyOrder(ticket)) return false;
+   if(!CanSendTradeRequest()) return false;
 
    MqlTradeRequest req = {};
    MqlTradeResult  res = {};
@@ -1649,7 +1671,8 @@ void HandleTradeError(uint retcode)
    if(retcode == TRADE_RETCODE_INVALID_STOPS || retcode == TRADE_RETCODE_FROZEN || retcode == TRADE_RETCODE_INVALID_PRICE)
    {
       if(dynamicSafetyPoints < 100) dynamicSafetyPoints += 5;
-      if(ShowChartInfo) Print("🛡️ Ajuste de Precisão: +", dynamicSafetyPoints, " pts");
+      if(ShowChartInfo && dynamicSafetyPoints % 10 == 0)
+         PrintFormat("🛡️ Proteção Dinâmica: %d pts", dynamicSafetyPoints);
    }
 
    if(!ShowChartInfo) return;
