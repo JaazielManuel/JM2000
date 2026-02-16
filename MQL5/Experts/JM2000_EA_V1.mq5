@@ -104,6 +104,10 @@ double   lastExitPrice         = 0;
 bool     forceBuyReposition    = false;
 bool     forceSellReposition   = false;
 
+//--- Variáveis de Segurança Adaptativa
+int      dynamicSafetyPoints   = 20;    // Buffer extra que aumenta em erros
+datetime lastSafetyDecay       = 0;
+
 //--- Variáveis de controle do broker
 int stopsLevel           = 0;
 int freezeLevel          = 0;
@@ -178,6 +182,7 @@ void     ApplyGlobalTrailing();
 void     RepositionGridImmediately(bool isBuy, double targetPrice);
 void     SynchronizeClusterSL(bool isBuy);
 double   GetClusterSL(bool isBuy);
+bool     IsPriceSafe(double price, bool isBuy, bool isSL);
 
 //+------------------------------------------------------------------+
 //| Remove elemento do array                                         |
@@ -811,6 +816,22 @@ bool ModifyPendingOrder(ulong ticket, double newPrice, double newSL)
    MqlTradeRequest req = {};
    MqlTradeResult  res = {};
 
+   // Validação Rigorosa antes do envio
+   long type = OrderGetInteger(ORDER_TYPE);
+   bool isBuy = (type == ORDER_TYPE_BUY_STOP || type == ORDER_TYPE_BUY_LIMIT);
+
+   if(!IsPriceSafe(newPrice, isBuy, false) || !IsPriceSafe(newSL, isBuy, true))
+   {
+      // Se não for seguro, forçamos um ajuste fino baseado nos novos buffers adaptativos
+      newPrice = isBuy ? (cachedAsk + (stopsLevel + dynamicSafetyPoints + cachedSpread + 10) * cachedPoint)
+                       : (cachedBid - (stopsLevel + dynamicSafetyPoints + cachedSpread + 10) * cachedPoint);
+      newPrice = NormalizeDouble(newPrice, cachedDigits);
+      newSL    = CalculateValidSL(newPrice, isBuy);
+
+      // Segunda verificação: se ainda não for seguro, abortamos para evitar rejeição
+      if(!IsPriceSafe(newPrice, isBuy, false)) return false;
+   }
+
    req.action = TRADE_ACTION_MODIFY;
    req.order  = ticket;
    req.price  = newPrice;
@@ -826,11 +847,14 @@ bool ModifyPendingOrder(ulong ticket, double newPrice, double newSL)
       return true;
    }
 
-   // Se falhou por estar muito perto do mercado, aplicamos um cooldown forçado no ticket
-   if(res.retcode == TRADE_RETCODE_INVALID_STOPS || res.retcode == TRADE_RETCODE_FROZEN)
+   // Se falhou por estar muito perto do mercado, aplicamos um cooldown e forçamos a recriação se persistir
+   if(res.retcode == TRADE_RETCODE_INVALID_STOPS || res.retcode == TRADE_RETCODE_FROZEN || res.retcode == TRADE_RETCODE_INVALID_PRICE)
    {
-      if(OrderGetInteger(ORDER_TYPE) == ORDER_TYPE_BUY_STOP) lastBuyModifyTick = GetTickCount64() + 2000;
-      else if(OrderGetInteger(ORDER_TYPE) == ORDER_TYPE_SELL_STOP) lastSellModifyTick = GetTickCount64() + 2000;
+      if(OrderGetInteger(ORDER_TYPE) == ORDER_TYPE_BUY_STOP) lastBuyModifyTick = GetTickCount64() + 3000;
+      else if(OrderGetInteger(ORDER_TYPE) == ORDER_TYPE_SELL_STOP) lastSellModifyTick = GetTickCount64() + 3000;
+
+      // Força o cancelamento da ordem problemática para que o sistema a recrie no local correto no próximo ciclo
+      CancelOrder(ticket);
    }
 
    HandleTradeError(res.retcode);
@@ -870,10 +894,16 @@ void RepositionGridImmediately(bool isBuy, double targetPrice)
       else
          newPrice = targetPrice - (i * SpacingPoints) * cachedPoint;
 
-      // Ajuste de segurança para não ficar colado no preço atual (Stops Level)
+      // Ajuste de segurança ultra-robusto (Stops Level + Dynamic Safety)
       double minP = GetValidPendingPrice(isBuy, 0);
-      if(isBuy) newPrice = MathMax(newPrice, minP);
-      else      newPrice = MathMin(newPrice, minP);
+      if(isBuy)
+      {
+         if(newPrice < minP) newPrice = minP;
+      }
+      else
+      {
+         if(newPrice > minP) newPrice = minP;
+      }
 
       newPrice = NormalizeDouble(newPrice, cachedDigits);
       double newSL = CalculateValidSL(newPrice, isBuy);
@@ -953,6 +983,49 @@ void UpdatePriceCache()
    // Atualiza stops e freeze levels dinamicamente (algumas corretoras mudam em alta volatilidade)
    stopsLevel  = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
    freezeLevel = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL);
+
+   // Detecção de Mercado Volátil: se spread > 2x média, aumenta segurança
+   if(averageSpread > 0 && cachedSpread > averageSpread * 2.0)
+   {
+      dynamicSafetyPoints += 2;
+      if(dynamicSafetyPoints > 200) dynamicSafetyPoints = 200;
+   }
+
+   // Decay lento da segurança adaptativa (reduz 1 ponto a cada 5 minutos)
+   datetime now = TimeCurrent();
+   if(now - lastSafetyDecay > 300)
+   {
+      if(dynamicSafetyPoints > 20) dynamicSafetyPoints--;
+      lastSafetyDecay = now;
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Valida se o preço está em uma distância institucional segura     |
+//+------------------------------------------------------------------+
+bool IsPriceSafe(double price, bool isBuy, bool isSL)
+{
+   if(price <= 0) return false;
+
+   // Buffer total considerando Stops Level + Segurança Dinâmica + Spread atual
+   double totalBuffer = (stopsLevel + dynamicSafetyPoints + cachedSpread) * cachedPoint;
+
+   if(isBuy)
+   {
+      // Se for Buy Stop (preço acima do mercado) ou SL de Buy (preço abaixo do mercado)
+      if(!isSL) // BUY STOP
+         return (price > cachedAsk + totalBuffer);
+      else      // BUY SL
+         return (price < cachedBid - totalBuffer);
+   }
+   else
+   {
+      // Se for Sell Stop (preço abaixo do mercado) ou SL de Sell (preço acima do mercado)
+      if(!isSL) // SELL STOP
+         return (price < cachedBid - totalBuffer);
+      else      // SELL SL
+         return (price > cachedAsk + totalBuffer);
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -1399,9 +1472,9 @@ bool CreateSellStops(double lotSize, int count)
 //+------------------------------------------------------------------+
 double GetValidPendingPrice(bool isBuy, int additionalOffset = 0)
 {
-   // Multiplicador institucional para evitar erros de proximidade em ativos voláteis (XAUUSD)
+   // Multiplicador institucional ultra-seguro
    double safetyBuffer = (stopsLevel > 0) ? (stopsLevel * 2.0) : 30;
-   safetyBuffer += 15 + (additionalOffset > 0 ? additionalOffset : 0);
+   safetyBuffer += dynamicSafetyPoints + cachedSpread + 20 + (additionalOffset > 0 ? additionalOffset : 0);
 
    double minDist = safetyBuffer * cachedPoint;
 
@@ -1416,8 +1489,8 @@ double GetValidPendingPrice(bool isBuy, int additionalOffset = 0)
 //+------------------------------------------------------------------+
 double CalculateValidSL(double orderPrice, bool isBuy)
 {
-   // Safety Buffer de 2.0x StopsLevel + 10 pts
-   double safetyDist = ((stopsLevel > 0) ? stopsLevel * 2.0 : 30) + 10;
+   // Safety Buffer ultra-seguro
+   double safetyDist = ((stopsLevel > 0) ? stopsLevel * 2.0 : 30) + dynamicSafetyPoints + cachedSpread + 10;
    double minSLPoints = MathMax(safetyDist, (double)StopLossPoints);
 
    double dist  = minSLPoints * cachedPoint;
@@ -1563,6 +1636,13 @@ void HandleTradeError(uint retcode)
 {
    consecutiveErrors++;
    int lastErr = GetLastError();
+
+   // Aumenta a segurança adaptativa se o erro for proximidade ao mercado ou stops inválidos
+   if(retcode == TRADE_RETCODE_INVALID_STOPS || retcode == TRADE_RETCODE_FROZEN || retcode == TRADE_RETCODE_INVALID_PRICE)
+   {
+      dynamicSafetyPoints += 10;
+      if(ShowChartInfo) Print("🛡️ Segurança Adaptativa Reforçada: +", dynamicSafetyPoints, " pts");
+   }
 
    if(!ShowChartInfo) return;
 
