@@ -131,6 +131,7 @@ double stepVolume       = 0;
 double cachedBid        = 0;
 double cachedAsk        = 0;
 double cachedSpread     = 0;
+MqlTick currentTickData;
 
 //--- Estado
 int      consecutiveErrors     = 0;
@@ -188,6 +189,8 @@ void     SynchronizeClusterSL(bool isBuy);
 double   GetClusterSL(bool isBuy);
 bool     IsPriceSafe(double price, bool isBuy, bool isSL);
 bool     CanSendTradeRequest();
+double   NS(double price); // Normalize Symbol Price
+double   NV(double volume); // Normalize Volume
 
 //+------------------------------------------------------------------+
 //| Remove elemento do array                                         |
@@ -549,9 +552,7 @@ void ApplyIndividualTrailing()
 
          if(profitPoints >= BreakEvenPoints)
          {
-            double newSL = positions[i].entryPrice +
-                          (positions[i].isBuy ? 1 : -1) * BreakEvenPlusPoints * cachedPoint;
-            newSL = NormalizeDouble(newSL, cachedDigits);
+            double newSL = NS(positions[i].entryPrice + (positions[i].isBuy ? 1 : -1) * BreakEvenPlusPoints * cachedPoint);
 
             if(ModifyPositionSL(positions[i].ticket, newSL))
             {
@@ -564,8 +565,8 @@ void ApplyIndividualTrailing()
                // Fechamento parcial
                if(UsePartialClose && !positions[i].partialClosed && PartialClosePercent > 0)
                {
-                  double closeVolume = NormalizeVolume(positions[i].volume * PartialClosePercent / 100.0);
-                  if(closeVolume >= SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN))
+                  double closeVolume = NV(positions[i].volume * PartialClosePercent / 100.0);
+                  if(closeVolume >= minVolume)
                   {
                      if(ClosePartialPosition(positions[i].ticket, closeVolume))
                      {
@@ -588,7 +589,7 @@ void ApplyIndividualTrailing()
 
       if(positions[i].isBuy)
       {
-         newSL = NormalizeDouble(currentPrice - trailDist, cachedDigits);
+         newSL = NS(currentPrice - trailDist);
 
          // Só move se estiver em lucro e respeitar o step
          if(newSL > positions[i].entryPrice &&
@@ -602,7 +603,7 @@ void ApplyIndividualTrailing()
       }
       else // SELL
       {
-         newSL = NormalizeDouble(currentPrice + trailDist, cachedDigits);
+         newSL = NS(currentPrice + trailDist);
 
          if(newSL < positions[i].entryPrice &&
             (positions[i].currentSL == 0 || newSL < positions[i].currentSL - stepDist))
@@ -641,8 +642,8 @@ void ApplyDirectionalTrailing()
 
    const double trailDist = TrailingStopPoints * cachedPoint;
    const double stepDist  = TrailingStepPoints * cachedPoint;
-   const double newBuySL  = (buyMaxPrice > 0) ? NormalizeDouble(buyMaxPrice - trailDist, cachedDigits) : 0;
-   const double newSellSL = (sellMinPrice < DBL_MAX) ? NormalizeDouble(sellMinPrice + trailDist, cachedDigits) : 0;
+   const double newBuySL  = (buyMaxPrice > 0) ? NS(buyMaxPrice - trailDist) : 0;
+   const double newSellSL = (sellMinPrice < DBL_MAX) ? NS(sellMinPrice + trailDist) : 0;
 
    for(int i = 0; i < sz; i++)
    {
@@ -692,8 +693,8 @@ void ApplyGlobalTrailing()
    const double stepDist  = TrailingStepPoints * cachedPoint;
    const double avgBuyEntry = (totalBuyVolume > 0) ? buyWeightedPrice / totalBuyVolume : 0;
    const double avgSellEntry = (totalSellVolume > 0) ? sellWeightedPrice / totalSellVolume : 0;
-   const double newBuySL = NormalizeDouble(cachedBid - trailDist, cachedDigits);
-   const double newSellSL = NormalizeDouble(cachedAsk + trailDist, cachedDigits);
+   const double newBuySL = NS(cachedBid - trailDist);
+   const double newSellSL = NS(cachedAsk + trailDist);
 
    for(int i = 0; i < sz; i++)
    {
@@ -828,7 +829,7 @@ bool ModifyPendingOrder(ulong ticket, double newPrice, double newSL)
       else
          newPrice = MathMin(newPrice, cachedBid - safetyFloor);
 
-      newPrice = NormalizeDouble(newPrice, cachedDigits);
+      newPrice = NS(newPrice);
       newSL    = CalculateValidSL(newPrice, isBuy);
 
       if(!IsPriceSafe(newPrice, isBuy, false)) return false;
@@ -974,11 +975,10 @@ void SynchronizeClusterSL(bool isBuy)
 //+------------------------------------------------------------------+
 void UpdatePriceCache()
 {
-   MqlTick lastTick;
-   if(SymbolInfoTick(_Symbol, lastTick))
+   if(SymbolInfoTick(_Symbol, currentTickData))
    {
-      cachedBid    = lastTick.bid;
-      cachedAsk    = lastTick.ask;
+      cachedBid    = currentTickData.bid;
+      cachedAsk    = currentTickData.ask;
       cachedSpread = (cachedAsk - cachedBid) / (cachedPoint > 0 ? cachedPoint : _Point);
    }
 
@@ -1008,18 +1008,34 @@ bool CanSendTradeRequest()
 {
    ulong currentTick = GetTickCount64();
 
-   // Se passou mais de 1 segundo desde a última janela, reseta o contador
+   // Buffer de rajada (burst): permite até 5 requisições rápidas, depois limita a 2 por segundo
    if(currentTick - lastGlobalRequestTick > 1000)
    {
       lastGlobalRequestTick = currentTick;
       requestsInWindow = 0;
    }
 
-   // Se atingiu o limite de 3 requisições por segundo, bloqueia
-   if(requestsInWindow >= 3) return false;
+   if(requestsInWindow >= 5) return false;
 
    requestsInWindow++;
    return true;
+}
+
+//+------------------------------------------------------------------+
+//| Normaliza preço do símbolo (Alta Performance)                    |
+//+------------------------------------------------------------------+
+double NS(double price)
+{
+   return NormalizeDouble(price, cachedDigits);
+}
+
+//+------------------------------------------------------------------+
+//| Normaliza volume da operação (Alta Performance)                  |
+//+------------------------------------------------------------------+
+double NV(double volume)
+{
+   if(stepVolume <= 0) return NormalizeDouble(volume, 2);
+   return NormalizeDouble(MathRound(volume / stepVolume) * stepVolume, 2);
 }
 
 //+------------------------------------------------------------------+
@@ -1217,14 +1233,22 @@ int GetAdaptiveUpdatePoints()
 //+------------------------------------------------------------------+
 void ManageContinuousPendingOrders()
 {
+   static double tradeLot = 0;
+   static int adaptiveUpdate = 0;
+   static datetime lastUpdate = 0;
+
    datetime currentTime = TimeCurrent();
 
-   double tradeLot = CalculateDynamicLot();
+   // Recalcula lote e sensibilidade apenas a cada 1 segundo para poupar CPU
+   if(currentTime != lastUpdate)
+   {
+      tradeLot = CalculateDynamicLot();
+      adaptiveUpdate = GetAdaptiveUpdatePoints();
+      lastUpdate = currentTime;
+   }
 
    if(UseDynamicLot && !HasSufficientMargin(tradeLot * InitialOrdersCount))
       return;
-
-   int adaptiveUpdate = GetAdaptiveUpdatePoints();
 
    ManageBuyStops(tradeLot, adaptiveUpdate, currentTime);
    ManageSellStops(tradeLot, adaptiveUpdate, currentTime);
@@ -1288,7 +1312,7 @@ void ManageBuyStops(double lotSize, int updateThreshold, datetime currentTime)
             double minP = GetValidPendingPrice(true, 0);
             if(newPrice < minP) newPrice = minP;
 
-            newPrice = NormalizeDouble(newPrice, cachedDigits);
+            newPrice = NS(newPrice);
             double newSL = CalculateValidSL(newPrice, true);
 
             if(ModifyPendingOrder(buyStopTickets[i], newPrice, newSL))
@@ -1359,7 +1383,7 @@ void ManageSellStops(double lotSize, int updateThreshold, datetime currentTime)
             double minP = GetValidPendingPrice(false, 0);
             if(newPrice > minP) newPrice = minP;
 
-            newPrice = NormalizeDouble(newPrice, cachedDigits);
+            newPrice = NS(newPrice);
             double newSL = CalculateValidSL(newPrice, false);
 
             if(ModifyPendingOrder(sellStopTickets[i], newPrice, newSL))
@@ -1506,9 +1530,9 @@ double GetValidPendingPrice(bool isBuy, int additionalOffset = 0)
    double finalDist = MathMax(userDist, safetyFloor) * cachedPoint;
 
    if(isBuy)
-      return NormalizeDouble(cachedAsk + finalDist, cachedDigits);
+      return NS(cachedAsk + finalDist);
    else
-      return NormalizeDouble(cachedBid - finalDist, cachedDigits);
+      return NS(cachedBid - finalDist);
 }
 
 //+------------------------------------------------------------------+
@@ -1540,7 +1564,7 @@ double CalculateValidSL(double orderPrice, bool isBuy)
       if(sl < marketPrice + minMarketDist) sl = marketPrice + minMarketDist;
    }
 
-   return NormalizeDouble(sl, cachedDigits);
+   return NS(sl);
 }
 
 //+------------------------------------------------------------------+
@@ -1630,7 +1654,7 @@ double CalculateDynamicLot()
          calculatedLot *= (safeMargin / requiredMargin);
    }
 
-   return NormalizeVolume(calculatedLot);
+   return NV(calculatedLot);
 }
 
 //+------------------------------------------------------------------+
@@ -1649,15 +1673,6 @@ bool HasSufficientMargin(double volume)
 //+------------------------------------------------------------------+
 //| Normaliza volume                                                 |
 //+------------------------------------------------------------------+
-double NormalizeVolume(double volume)
-{
-   volume = MathMax(volume, minVolume);
-   volume = MathMin(volume, maxVolume);
-   if(stepVolume > 0)
-      volume = MathRound(volume / stepVolume) * stepVolume;
-
-   return NormalizeDouble(volume, 2);
-}
 
 //+------------------------------------------------------------------+
 //| Tratamento de erros                                              |
@@ -1704,9 +1719,10 @@ void DisplayStatusInfo()
 {
    if(!ShowChartInfo) return;
 
-   static int displayCounter = 0;
-   if(++displayCounter < 100) return;
-   displayCounter = 0;
+   static uint lastDisplay = 0;
+   uint now = GetTickCount();
+   if(now - lastDisplay < 500) return; // Atualiza apenas a cada 500ms
+   lastDisplay = now;
 
    double totalProfit = 0;
    for(int i = 0; i < countTotal; i++)
