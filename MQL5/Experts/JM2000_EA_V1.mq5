@@ -826,6 +826,13 @@ bool ModifyPendingOrder(ulong ticket, double newPrice, double newSL)
       return true;
    }
 
+   // Se falhou por estar muito perto do mercado, aplicamos um cooldown forçado no ticket
+   if(res.retcode == TRADE_RETCODE_INVALID_STOPS || res.retcode == TRADE_RETCODE_FROZEN)
+   {
+      if(OrderGetInteger(ORDER_TYPE) == ORDER_TYPE_BUY_STOP) lastBuyModifyTick = GetTickCount64() + 2000;
+      else if(OrderGetInteger(ORDER_TYPE) == ORDER_TYPE_SELL_STOP) lastSellModifyTick = GetTickCount64() + 2000;
+   }
+
    HandleTradeError(res.retcode);
    return false;
 }
@@ -935,9 +942,17 @@ void SynchronizeClusterSL(bool isBuy)
 //+------------------------------------------------------------------+
 void UpdatePriceCache()
 {
-   cachedBid    = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   cachedAsk    = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   cachedSpread = (cachedAsk - cachedBid) / cachedPoint;
+   MqlTick lastTick;
+   if(SymbolInfoTick(_Symbol, lastTick))
+   {
+      cachedBid    = lastTick.bid;
+      cachedAsk    = lastTick.ask;
+      cachedSpread = (cachedAsk - cachedBid) / (cachedPoint > 0 ? cachedPoint : _Point);
+   }
+
+   // Atualiza stops e freeze levels dinamicamente (algumas corretoras mudam em alta volatilidade)
+   stopsLevel  = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   freezeLevel = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL);
 }
 
 //+------------------------------------------------------------------+
@@ -1384,8 +1399,11 @@ bool CreateSellStops(double lotSize, int count)
 //+------------------------------------------------------------------+
 double GetValidPendingPrice(bool isBuy, int additionalOffset = 0)
 {
-   int    totalOffset = adjustedOffsetPoints + additionalOffset;
-   double minDist     = totalOffset * cachedPoint;
+   // Multiplicador institucional para evitar erros de proximidade em ativos voláteis (XAUUSD)
+   double safetyBuffer = (stopsLevel > 0) ? (stopsLevel * 2.0) : 30;
+   safetyBuffer += 15 + (additionalOffset > 0 ? additionalOffset : 0);
+
+   double minDist = safetyBuffer * cachedPoint;
 
    if(isBuy)
       return NormalizeDouble(cachedAsk + minDist, cachedDigits);
@@ -1398,21 +1416,26 @@ double GetValidPendingPrice(bool isBuy, int additionalOffset = 0)
 //+------------------------------------------------------------------+
 double CalculateValidSL(double orderPrice, bool isBuy)
 {
-   int    minSL = MathMax(stopsLevel + 5, adjustedStopLossPoints);
-   double dist  = minSL * cachedPoint;
+   // Safety Buffer de 2.0x StopsLevel + 10 pts
+   double safetyDist = ((stopsLevel > 0) ? stopsLevel * 2.0 : 30) + 10;
+   double minSLPoints = MathMax(safetyDist, (double)StopLossPoints);
+
+   double dist  = minSLPoints * cachedPoint;
    double sl    = isBuy ? (orderPrice - dist) : (orderPrice + dist);
 
-   // Garantia adicional: o SL deve estar a uma distância segura do preço atual de mercado
+   // Garantia adicional: o SL deve estar a uma distância segura do preço atual de mercado (Bid/Ask)
    double marketPrice = isBuy ? cachedBid : cachedAsk;
-   double minDistance = (stopsLevel + 5) * cachedPoint;
+   double minMarketDistance = safetyDist * cachedPoint;
 
    if(isBuy)
    {
-      if(sl > marketPrice - minDistance) sl = marketPrice - minDistance;
+      // Para COMPRA, SL deve ser < Bid
+      if(sl > marketPrice - minMarketDistance) sl = marketPrice - minMarketDistance;
    }
    else
    {
-      if(sl < marketPrice + minDistance) sl = marketPrice + minDistance;
+      // Para VENDA, SL deve ser > Ask
+      if(sl < marketPrice + minMarketDistance) sl = marketPrice + minMarketDistance;
    }
 
    return NormalizeDouble(sl, cachedDigits);
@@ -1555,6 +1578,7 @@ void HandleTradeError(uint retcode)
       case TRADE_RETCODE_NO_MONEY:      msg = "Margem insuficiente na conta"; break;
       case TRADE_RETCODE_LIMIT_ORDERS:  msg = "Limite máximo de ordens atingido"; break;
       case TRADE_RETCODE_TOO_MANY_REQUESTS: msg = "Muitas requisições (Spam)"; break;
+      case TRADE_RETCODE_TIMEOUT:       msg = "Tempo esgotado (Timeout)"; break;
       default: msg = "Erro desconhecido (" + (string)retcode + ")"; break;
    }
 
