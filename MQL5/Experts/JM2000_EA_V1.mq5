@@ -109,7 +109,7 @@ bool     forceBuyReposition    = false;
 bool     forceSellReposition   = false;
 
 //--- Variáveis de Segurança Adaptativa
-int      dynamicSafetyPoints   = 5;     // Buffer extra reduzido para precisão
+int      dynamicSafetyPoints   = 2;     // Buffer extra mínimo para precisão extrema
 datetime lastSafetyDecay       = 0;
 
 //--- Variáveis de controle do broker
@@ -989,14 +989,14 @@ void UpdatePriceCache()
    // Detecção de Mercado Volátil: se spread > 3x média, aumenta segurança levemente
    if(averageSpread > 0 && cachedSpread > averageSpread * 3.0)
    {
-      if(dynamicSafetyPoints < 50) dynamicSafetyPoints += 1;
+      if(dynamicSafetyPoints < 15) dynamicSafetyPoints += 1;
    }
 
-   // Decay da segurança adaptativa (reduz 1 ponto a cada 2 minutos para voltar à precisão rápido)
+   // Decay rápido da segurança adaptativa (reduz 1 ponto a cada minuto para voltar à precisão rápido)
    datetime now = TimeCurrent();
-   if(now - lastSafetyDecay > 120)
+   if(now - lastSafetyDecay > 60)
    {
-      if(dynamicSafetyPoints > 5) dynamicSafetyPoints--;
+      if(dynamicSafetyPoints > 2) dynamicSafetyPoints--;
       lastSafetyDecay = now;
    }
 }
@@ -1045,8 +1045,8 @@ bool IsPriceSafe(double price, bool isBuy, bool isSL)
 {
    if(price <= 0) return false;
 
-   // Buffer total considerando Stops Level + Segurança Dinâmica + Spread atual
-   double totalBuffer = (stopsLevel + dynamicSafetyPoints + cachedSpread) * cachedPoint;
+   // Buffer minimalista e preciso: Stops Level + segurança dinâmica + margem de 1 ponto
+   double totalBuffer = (stopsLevel + dynamicSafetyPoints + 1) * cachedPoint;
 
    if(isBuy)
    {
@@ -1520,14 +1520,15 @@ bool CreateSellStops(double lotSize, int count)
 //+------------------------------------------------------------------+
 double GetValidPendingPrice(bool isBuy, int additionalOffset = 0)
 {
-   // Floor de segurança dinâmica: mínimo necessário para não ser rejeitado
-   double safetyFloor = stopsLevel + dynamicSafetyPoints + cachedSpread + 2;
+   // Floor de segurança absoluto da corretora
+   double brokerMin = stopsLevel + dynamicSafetyPoints + 1;
 
-   // Preferência total aos parâmetros do usuário
+   // Distância desejada pelo usuário
    double userDist = OffsetPoints + additionalOffset;
 
-   // O preço final deve respeitar o maior entre o desejado e o floor de segurança
-   double finalDist = MathMax(userDist, safetyFloor) * cachedPoint;
+   // Garante que respeitamos o parâmetro do usuário, a menos que viole a regra da corretora
+   double finalDistPoints = MathMax(userDist, brokerMin);
+   double finalDist = finalDistPoints * cachedPoint;
 
    if(isBuy)
       return NS(cachedAsk + finalDist);
@@ -1540,20 +1541,20 @@ double GetValidPendingPrice(bool isBuy, int additionalOffset = 0)
 //+------------------------------------------------------------------+
 double CalculateValidSL(double orderPrice, bool isBuy)
 {
-   // Floor de segurança mínima para o SL
-   double safetyFloor = stopsLevel + dynamicSafetyPoints + 2;
+   // Distância mínima permitida pela corretora
+   double brokerMin = stopsLevel + dynamicSafetyPoints + 1;
 
-   // Distância desejada pelo usuário
+   // Distância desejada pelo usuário (StopLossPoints)
    double userSL = (double)StopLossPoints;
 
-   double finalDistPoints = MathMax(userSL, safetyFloor);
-   double dist = finalDistPoints * cachedPoint;
+   // 1. Calcula o SL baseando-se no preço da ordem e respeitando o parâmetro do usuário
+   double distPoints = MathMax(userSL, brokerMin);
+   double sl = isBuy ? (orderPrice - distPoints * cachedPoint) : (orderPrice + distPoints * cachedPoint);
 
-   double sl = isBuy ? (orderPrice - dist) : (orderPrice + dist);
-
-   // Ajuste fino: o SL deve estar a uma distância segura do preço atual (Bid/Ask)
+   // 2. Validação contra o PREÇO DE MERCADO ATUAL (Regra de ouro das corretoras)
+   // O SL deve estar a pelo menos 'brokerMin' do Bid (Buy) ou Ask (Sell)
    double marketPrice = isBuy ? cachedBid : cachedAsk;
-   double minMarketDist = safetyFloor * cachedPoint;
+   double minMarketDist = brokerMin * cachedPoint;
 
    if(isBuy)
    {
@@ -1685,9 +1686,9 @@ void HandleTradeError(uint retcode)
    // Aumenta a segurança adaptativa levemente se o erro for proximidade ao mercado ou stops inválidos
    if(retcode == TRADE_RETCODE_INVALID_STOPS || retcode == TRADE_RETCODE_FROZEN || retcode == TRADE_RETCODE_INVALID_PRICE)
    {
-      if(dynamicSafetyPoints < 100) dynamicSafetyPoints += 5;
-      if(ShowChartInfo && dynamicSafetyPoints % 10 == 0)
-         PrintFormat("🛡️ Proteção Dinâmica: %d pts", dynamicSafetyPoints);
+      if(dynamicSafetyPoints < 20) dynamicSafetyPoints += 2;
+      if(ShowChartInfo)
+         PrintFormat("🛡️ Ajuste Fino: %d pts", dynamicSafetyPoints);
    }
 
    if(!ShowChartInfo) return;
