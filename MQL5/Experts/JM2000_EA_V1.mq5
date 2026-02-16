@@ -1,0 +1,1793 @@
+//+------------------------------------------------------------------+
+//|                 JM2000 EA V1                                     |
+//|                                  Copyright © 2026, NeuralTrader  |
+//|                                                                  |
+//+------------------------------------------------------------------+
+#property copyright "Copyright 2026"
+#property version   "1.0"
+#property description "JM2000 EA V1 - Trailing Stop Otimizado"
+
+#define EA_NAME "JM2000 EA V1"
+
+//--- Enumeração para modos de trailing (DEVE estar ANTES dos inputs)
+enum ENUM_TRAILING_MODE
+{
+   TRAILING_INDIVIDUAL,    // Individual (cada posição independente)
+   TRAILING_BY_DIRECTION,  // Por direção (todas BUY juntas, todas SELL juntas)
+   TRAILING_GLOBAL         // Global (todas as posições movem juntas)
+};
+
+input group "=== CONFIGURAÇÕES DE EXECUÇÃO ==="
+input int    StopLossPoints      = 50;    // Stop Loss inicial (pontos)
+input double Lots                = 0.01;  // Volume do lote (se lote dinâmico desligado)
+input int    MagicNumber         = 12345; // Identificador único da EA (Magic Number)
+input int    OffsetPoints        = 10;    // Distância para abrir ordens pendentes (pontos)
+input int    UpdatePoints        = 5;     // Sensibilidade para mover as ordens (pontos)
+
+input group "=== ESTRATÉGIA DE TRAILING STOP ==="
+input ENUM_TRAILING_MODE TrailingMode = TRAILING_INDIVIDUAL; // Modo de funcionamento do Trailing
+input int    TrailingStopPoints  = 20;    // Distância do Trailing Stop (pontos)
+input int    TrailingStepPoints  = 10;    // Passo mínimo para mover o Stop Loss (pontos)
+input int    BreakEvenPoints     = 30;    // Pontos de lucro para ativar BreakEven (0=desativado)
+input int    BreakEvenPlusPoints = 5;     // Pontos de segurança acima da entrada no BreakEven
+input bool   UsePartialClose     = false; // Fechar parte da posição ao atingir o BreakEven?
+input double PartialClosePercent = 50.0;  // Porcentagem para fechar no BreakEven (ex: 50.0)
+
+input group "=== CONFIGURAÇÕES DA GRADE (GRID) ==="
+input int    InitialOrdersCount  = 3;     // Quantidade de ordens pendentes em cada lado
+input double SpacingPoints       = 5;     // Espaço entre cada ordem da grade (pontos)
+
+input group "=== GERENCIAMENTO DE RISCO ==="
+input bool   UseDynamicLot          = false; // Usar cálculo de lote automático baseado no risco?
+input double RiskPercent            = 2.0;   // Porcentagem de risco por operação
+input double MaxLotSize             = 10.0;  // Tamanho máximo permitido para o lote
+input double MarginSafetyPercent    = 20.0;  // Porcentagem de margem livre para manter de reserva
+
+input group "=== LIMITES DE OPERAÇÃO ==="
+input int    MaxPositions           = 0;     // Máximo de posições totais abertas (0 = ilimitado)
+input int    MaxBuyPositions        = 0;     // Máximo de posições de COMPRA (0 = ilimitado)
+input int    MaxSellPositions       = 0;     // Máximo de posições de VENDA (0 = ilimitado)
+input bool   AllowHedging           = true;  // Permitir COMPRA e VENDA ao mesmo tempo?
+
+input group "=== FILTROS E SEGURANÇA ==="
+input double MaxDrawdownPercent     = 5.0;   // Limite de perda (Drawdown %) para pausar EA
+input bool   SafeModeOnErrors       = true;  // Ativar Modo de Segurança se houver muitos erros?
+input int    MaxConsecutiveErrors   = 3;     // Quantidade de erros para entrar em Modo de Segurança
+input bool   UseSpreadFilter          = true;  // Bloquear operações com Spread muito alto?
+input double MaxSpreadMultiplier      = 2.0;   // Multiplicador máximo do Spread médio
+input bool   UseTimeFilter            = false; // Usar filtro de horário de negociação?
+input int    AvoidLastMinutesFriday   = 30;    // Minutos antes de fechar a sexta para parar
+input int    AvoidFirstMinutesSunday  = 10;    // Minutos após abrir o domingo para começar
+
+input group "=== INTERFACE E PERFORMANCE ==="
+input bool   ShowChartInfo      = true;   // Mostrar painel de informações no gráfico?
+input bool   UseAdaptiveUpdate  = true;   // Ajustar sensibilidade automaticamente?
+input int    RecreateDelaySeconds = 0;    // Tempo de espera para recriar ordens (segundos)
+input int    ModificationCooldownMS = 1000; // Intervalo mínimo entre modificações (ms)
+
+input group "=== CUSTOMIZAÇÃO VISUAL ==="
+input bool   ApplyChartColors   = true;       // Aplicar as cores abaixo ao gráfico?
+input color  CandleBullColor    = clrGold;    // Cor das velas de Alta (COMPRA)
+input color  CandleBearColor    = clrCrimson; // Cor das velas de Baixa (VENDA)
+input color  ChartBackground    = clrBlack;   // Cor do fundo do gráfico
+input color  ChartGrid          = clrDimGray; // Cor da grade do gráfico
+input color  ChartText          = clrWhite;   // Cor das letras e textos
+
+//--- Estrutura para gerenciar posições individuais
+struct PositionTracker
+{
+   ulong    ticket;
+   double   entryPrice;
+   double   currentSL;
+   double   volume;
+   double   initialVolume;
+   bool     isBuy;
+   bool     breakEvenSet;
+   bool     partialClosed;
+   double   highestProfit;
+   double   highestPrice;  // BUY: maior Bid alcançado / SELL: menor Ask alcançado
+   datetime openTime;
+};
+
+//--- Variáveis globais
+ulong buyStopTickets[];
+ulong sellStopTickets[];
+PositionTracker positions[];
+datetime lastBuyOrderCreation  = 0;
+datetime lastSellOrderCreation = 0;
+datetime lastOrderUpdateTime   = 0;
+ulong    lastBuyModifyTick     = 0;
+ulong    lastSellModifyTick    = 0;
+
+//--- Variáveis para Controle de Mensagens (Trade Spam Prevention)
+ulong    lastGlobalRequestTick = 0;
+int      requestsInWindow      = 0;
+
+//--- Variáveis para Lógica de Reversão Instantânea
+double   lastExitPrice         = 0;
+bool     forceBuyReposition    = false;
+bool     forceSellReposition   = false;
+
+//--- Variáveis de Segurança Adaptativa
+int      dynamicSafetyPoints   = 2;     // Buffer extra mínimo para precisão extrema
+datetime lastSafetyDecay       = 0;
+
+//--- Variáveis de controle do broker
+int stopsLevel           = 0;
+int freezeLevel          = 0;
+int adjustedOffsetPoints = 0;
+int adjustedStopLossPoints = 0;
+
+//--- Cache Global (Symbol Info)
+double cachedPoint      = 0;
+int    cachedDigits     = 0;
+double cachedTickValue  = 0;
+double cachedTickSize   = 0;
+double minVolume        = 0;
+double maxVolume        = 0;
+double stepVolume       = 0;
+
+//--- Cache Dinâmico (Tick Data)
+double cachedBid        = 0;
+double cachedAsk        = 0;
+double cachedSpread     = 0;
+MqlTick currentTickData;
+
+//--- Estado
+int      consecutiveErrors     = 0;
+bool     safeModeActive        = false;
+double   averageSpread         = 0;
+double   spreadSum             = 0;
+double   maxEquityReached      = 0;
+double   cachedATR             = 0;
+datetime lastATRUpdate         = 0;
+int      handleATR             = INVALID_HANDLE;
+int      countBuy              = 0;
+int      countSell             = 0;
+int      countTotal            = 0;
+
+//--- Spread history
+double   spreadHistory[100];
+int      spreadIndex = 0;
+bool     spreadHistoryReady = false;
+
+//--- Protótipos de funções
+void     UpdatePositionTracker();
+void     SyncPendingOrders();
+void     UpdatePriceCache();
+void     UpdateATRCache();
+void     CalculateAverageSpread();
+void     MonitorDrawdownAndSafeMode();
+bool     IsMarketConditionSafe();
+void     ApplyOptimizedTrailing();
+void     ManageContinuousPendingOrders();
+void     DisplayStatusInfo();
+double   CalculateDynamicLot();
+bool     HasSufficientMargin(double volume);
+double   NormalizeVolume(double volume);
+void     HandleTradeError(uint retcode);
+void     CountOpenPositions(int &buyCount, int &sellCount, int &totalCount);
+bool     CanOpenMorePositions(bool isBuy);
+int      GetAdaptiveUpdatePoints();
+void     ManageBuyStops(double lotSize, int updateThreshold, datetime currentTime);
+void     ManageSellStops(double lotSize, int updateThreshold, datetime currentTime);
+bool     CreateBuyStops(double lotSize, int count);
+bool     CreateSellStops(double lotSize, int count);
+double   GetValidPendingPrice(bool isBuy, int additionalOffset = 0);
+double   CalculateValidSL(double orderPrice, bool isBuy);
+bool     CanModifyOrder(ulong ticket);
+bool     CancelOrder(ulong ticket);
+ENUM_ORDER_TYPE_FILLING GetMarketFilling();
+bool     ClosePartialPosition(ulong ticket, double volume);
+bool     ModifyPositionSL(ulong ticket, double newSL);
+bool     ModifyPendingOrder(ulong ticket, double newPrice, double newSL);
+void     ApplyIndividualTrailing();
+void     ApplyDirectionalTrailing();
+void     ApplyGlobalTrailing();
+void     RepositionGridImmediately(bool isBuy, double targetPrice);
+void     SynchronizeClusterSL(bool isBuy);
+double   GetClusterSL(bool isBuy);
+bool     IsPriceSafe(double price, bool isBuy, bool isSL);
+bool     CanSendTradeRequest();
+double   NS(double price); // Normalize Symbol Price
+double   NV(double volume); // Normalize Volume
+
+//+------------------------------------------------------------------+
+//| Remove elemento do array                                         |
+//+------------------------------------------------------------------+
+template<typename T>
+void RemoveArrayElement(T &arr[], int index)
+{
+   int size = ArraySize(arr);
+   if(index < 0 || index >= size) return;
+   if(index < size - 1)
+      ArrayCopy(arr, arr, index, index + 1);
+   ArrayResize(arr, size - 1);
+}
+
+//+------------------------------------------------------------------+
+//| Configura cores do gráfico                                       |
+//+------------------------------------------------------------------+
+void ApplyCustomChartColors()
+{
+   if(!ApplyChartColors) return;
+   long chartID = ChartID();
+   ChartSetInteger(chartID, CHART_COLOR_CANDLE_BULL,  CandleBullColor);
+   ChartSetInteger(chartID, CHART_COLOR_CANDLE_BEAR,  CandleBearColor);
+   ChartSetInteger(chartID, CHART_COLOR_BACKGROUND,   ChartBackground);
+   ChartSetInteger(chartID, CHART_COLOR_GRID,         ChartGrid);
+   ChartSetInteger(chartID, CHART_COLOR_FOREGROUND,   ChartText);
+   ChartSetInteger(chartID, CHART_COLOR_CHART_LINE,   ChartText);
+   ChartSetInteger(chartID, CHART_COLOR_CHART_UP,     CandleBullColor);
+   ChartSetInteger(chartID, CHART_COLOR_CHART_DOWN,   CandleBearColor);
+   ChartSetInteger(chartID, CHART_COLOR_VOLUME,       clrDodgerBlue);
+   ChartSetInteger(chartID, CHART_COLOR_BID,          CandleBullColor);
+   ChartSetInteger(chartID, CHART_COLOR_ASK,          CandleBearColor);
+   ChartSetInteger(chartID, CHART_COLOR_LAST,         clrYellow);
+   ChartSetInteger(chartID, CHART_MODE,               CHART_CANDLES);
+   ChartRedraw(chartID);
+}
+
+//+------------------------------------------------------------------+
+//| Expert initialization                                            |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+   // Sincronização inicial
+   UpdatePositionTracker();
+   SyncPendingOrders();
+
+   if(InitialOrdersCount < 1 || InitialOrdersCount > 20)
+   {
+      Print("ERRO: InitialOrdersCount deve estar entre 1 e 20");
+      return INIT_PARAMETERS_INCORRECT;
+   }
+   if(StopLossPoints < 5)
+   {
+      Print("ERRO: StopLossPoints muito baixo (mínimo 5)");
+      return INIT_PARAMETERS_INCORRECT;
+   }
+   if(TrailingStopPoints < 5)
+   {
+      Print("ERRO: TrailingStopPoints muito baixo (mínimo 5)");
+      return INIT_PARAMETERS_INCORRECT;
+   }
+
+   // Verifica se o trading é permitido no símbolo
+   long tradeMode = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_MODE);
+   if(tradeMode == SYMBOL_TRADE_MODE_DISABLED)
+   {
+      Print("ERRO: Negociação desativada para este símbolo.");
+      return INIT_FAILED;
+   }
+
+   // Cache de informações fixas do símbolo
+   stopsLevel  = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   freezeLevel = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL);
+
+   cachedPoint     = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   cachedDigits    = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   cachedTickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   cachedTickSize  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+
+   minVolume       = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   maxVolume       = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   stepVolume      = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+
+   adjustedOffsetPoints    = MathMax(OffsetPoints,    stopsLevel + 10);
+   adjustedStopLossPoints  = MathMax(StopLossPoints,  stopsLevel + 10);
+
+   ArrayResize(buyStopTickets,  0);
+   ArrayResize(sellStopTickets, 0);
+   ArrayResize(positions, 0);
+   ArrayInitialize(spreadHistory, 0);
+
+   maxEquityReached = AccountInfoDouble(ACCOUNT_EQUITY);
+
+   // Inicializa indicador ATR de forma eficiente
+   handleATR = iATR(_Symbol, PERIOD_M1, 14);
+   if(handleATR == INVALID_HANDLE)
+   {
+      Print("ERRO: Falha ao criar handle do ATR");
+      return INIT_FAILED;
+   }
+
+   UpdatePriceCache();
+   CalculateAverageSpread();
+   ApplyCustomChartColors();
+
+   string trailingModeStr = "";
+   switch(TrailingMode)
+   {
+      case TRAILING_INDIVIDUAL:   trailingModeStr = "INDIVIDUAL"; break;
+      case TRAILING_BY_DIRECTION: trailingModeStr = "POR DIREÇÃO"; break;
+      case TRAILING_GLOBAL:       trailingModeStr = "GLOBAL"; break;
+   }
+
+   Print("═══════════════════════════════════════════════");
+   Print(EA_NAME, " - INICIALIZAÇÃO BEM SUCEDIDA");
+   Print("═══════════════════════════════════════════════");
+   Print("Modo Trailing: ",      trailingModeStr);
+   Print("Distância Trail: ",    TrailingStopPoints, " pts");
+   Print("Passo Trail: ",       TrailingStepPoints, " pts");
+   Print("BreakEven: ",          BreakEvenPoints, " pts");
+   Print("Ordens por Lado: ",    InitialOrdersCount);
+   Print("Espaçamento Grid: ",   SpacingPoints, " pts");
+   Print("Limite Posições: ",    MaxPositions == 0 ? "INFINITO (PIRÂMIDE ATIVA)" : IntegerToString(MaxPositions));
+   Print("Permitir Hedging: ",   AllowHedging ? "SIM" : "NÃO");
+   Print("═══════════════════════════════════════════════");
+
+   return INIT_SUCCEEDED;
+}
+
+//+------------------------------------------------------------------+
+//| Expert tick function                                             |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+   UpdatePriceCache();
+   UpdateATRCache();
+   MonitorDrawdownAndSafeMode();
+
+   if(!IsMarketConditionSafe()) return;
+
+   // ✅ Lógica de Reversão Instantânea (Prioridade Máxima)
+   if(forceBuyReposition)
+   {
+      RepositionGridImmediately(true, lastExitPrice);
+      forceBuyReposition = false;
+   }
+   if(forceSellReposition)
+   {
+      RepositionGridImmediately(false, lastExitPrice);
+      forceSellReposition = false;
+   }
+
+   // ✅ Sistema de trailing otimizado
+   ApplyOptimizedTrailing();
+
+   // ✅ Sistema de captura contínua
+   ManageContinuousPendingOrders();
+
+   DisplayStatusInfo();
+}
+
+//+------------------------------------------------------------------+
+//| Trade Transaction                                                |
+//+------------------------------------------------------------------+
+void OnTradeTransaction(const MqlTradeTransaction& trans,
+                        const MqlTradeRequest& request,
+                        const MqlTradeResult& result)
+{
+   // Detecta fechamento de posições para Reversão Instantânea
+   if(trans.type == TRADE_TRANSACTION_DEAL_ADD)
+   {
+      if(HistoryDealSelect(trans.deal))
+      {
+         long magic = HistoryDealGetInteger(trans.deal, DEAL_MAGIC);
+         if(magic == MagicNumber)
+         {
+            long entry = HistoryDealGetInteger(trans.deal, DEAL_ENTRY);
+            if(entry == DEAL_ENTRY_OUT)
+            {
+               long type = HistoryDealGetInteger(trans.deal, DEAL_TYPE);
+               lastExitPrice = HistoryDealGetDouble(trans.deal, DEAL_PRICE);
+
+               // Se fechou uma COMPRA (DEAL_TYPE_SELL), movemos a grade de VENDA
+               // Se fechou uma VENDA (DEAL_TYPE_BUY), movemos a grade de COMPRA
+               if(type == DEAL_TYPE_SELL) forceSellReposition = true;
+               if(type == DEAL_TYPE_BUY)  forceBuyReposition  = true;
+
+               if(ShowChartInfo)
+                  PrintFormat("⚡ Reversão @ %s", DoubleToString(lastExitPrice, cachedDigits));
+            }
+
+            // Detecta entrada na pirâmide para sincronizar SL
+            if(entry == DEAL_ENTRY_IN)
+            {
+               long type = HistoryDealGetInteger(trans.deal, DEAL_TYPE);
+               bool isBuy = (type == DEAL_TYPE_BUY);
+
+               if(ShowChartInfo)
+                  PrintFormat("🚀 Pirâmide %s", isBuy?"COMPRA":"VENDA");
+
+               SynchronizeClusterSL(isBuy);
+            }
+         }
+      }
+   }
+
+   if(trans.type == TRADE_TRANSACTION_ORDER_ADD ||
+      trans.type == TRADE_TRANSACTION_ORDER_DELETE ||
+      trans.type == TRADE_TRANSACTION_DEAL_ADD ||
+      trans.type == TRADE_TRANSACTION_HISTORY_ADD)
+   {
+      UpdatePriceCache();
+      UpdatePositionTracker();
+      SyncPendingOrders();
+      ManageContinuousPendingOrders();
+   }
+}
+
+//+------------------------------------------------------------------+
+//| ✅ Sincroniza ordens pendentes                                   |
+//+------------------------------------------------------------------+
+void SyncPendingOrders()
+{
+   for(int i = ArraySize(buyStopTickets) - 1; i >= 0; i--)
+      if(!OrderSelect(buyStopTickets[i]))
+         RemoveArrayElement(buyStopTickets, i);
+
+   for(int i = ArraySize(sellStopTickets) - 1; i >= 0; i--)
+      if(!OrderSelect(sellStopTickets[i]))
+         RemoveArrayElement(sellStopTickets, i);
+}
+
+
+//+------------------------------------------------------------------+
+//| ✅ Atualiza tracker de posições                                  |
+//+------------------------------------------------------------------+
+void UpdatePositionTracker()
+{
+   // Remove posições que foram fechadas
+   for(int i = ArraySize(positions) - 1; i >= 0; i--)
+   {
+      if(!PositionSelectByTicket(positions[i].ticket))
+      {
+         if(ShowChartInfo)
+            PrintFormat("📍 Posição #%d encerrada", positions[i].ticket);
+         RemoveArrayElement(positions, i);
+      }
+   }
+
+   // Adiciona novas posições
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(!PositionSelectByTicket(ticket)) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != MagicNumber || PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+
+      // Verifica se já está no tracker
+      bool found = false;
+      for(int j = 0, sz_track = ArraySize(positions); j < sz_track; j++)
+      {
+         if(positions[j].ticket == ticket)
+         {
+            // Atualiza dados que podem ter mudado
+            positions[j].currentSL = PositionGetDouble(POSITION_SL);
+            positions[j].volume    = PositionGetDouble(POSITION_VOLUME);
+            found = true;
+            break;
+         }
+      }
+
+      // Adiciona se for nova
+      if(!found)
+      {
+         int sz = ArraySize(positions);
+         if(ArrayResize(positions, sz + 1) > 0)
+         {
+            positions[sz].ticket         = ticket;
+            positions[sz].entryPrice     = PositionGetDouble(POSITION_PRICE_OPEN);
+            positions[sz].currentSL      = PositionGetDouble(POSITION_SL);
+            positions[sz].volume         = PositionGetDouble(POSITION_VOLUME);
+            positions[sz].initialVolume  = PositionGetDouble(POSITION_VOLUME);
+            positions[sz].isBuy          = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
+            positions[sz].breakEvenSet   = false;
+            positions[sz].partialClosed  = false;
+            positions[sz].highestProfit  = 0;
+            positions[sz].highestPrice   = positions[sz].isBuy ? cachedBid : cachedAsk;
+            positions[sz].openTime       = (datetime)PositionGetInteger(POSITION_TIME);
+
+            if(ShowChartInfo)
+               PrintFormat("📍 Nova posição #%d | %s | %.2f lots", ticket, positions[sz].isBuy ? "COMPRA" : "VENDA", positions[sz].volume);
+         }
+      }
+   }
+
+   // Atualiza contadores globais
+   countBuy = 0; countSell = 0;
+   countTotal = ArraySize(positions);
+   for(int i=0; i<countTotal; i++)
+   {
+      if(positions[i].isBuy) countBuy++; else countSell++;
+   }
+}
+
+//+------------------------------------------------------------------+
+//| ✅ Sistema de trailing otimizado                                 |
+//+------------------------------------------------------------------+
+void ApplyOptimizedTrailing()
+{
+   switch(TrailingMode)
+   {
+      case TRAILING_INDIVIDUAL:
+         ApplyIndividualTrailing();
+         break;
+
+      case TRAILING_BY_DIRECTION:
+         ApplyDirectionalTrailing();
+         break;
+
+      case TRAILING_GLOBAL:
+         ApplyGlobalTrailing();
+         break;
+   }
+}
+
+//+------------------------------------------------------------------+
+//| ✅ Trailing Individual - cada posição independente               |
+//+------------------------------------------------------------------+
+void ApplyIndividualTrailing()
+{
+   for(int i = 0; i < ArraySize(positions); i++)
+   {
+      if(!PositionSelectByTicket(positions[i].ticket)) continue;
+
+      double currentPrice = positions[i].isBuy ? cachedBid : cachedAsk;
+      double currentProfit = PositionGetDouble(POSITION_PROFIT);
+
+      // Atualiza maior preço alcançado
+      if(positions[i].isBuy)
+      {
+         if(currentPrice > positions[i].highestPrice)
+            positions[i].highestPrice = currentPrice;
+      }
+      else
+      {
+         if(currentPrice < positions[i].highestPrice)
+            positions[i].highestPrice = currentPrice;
+      }
+
+      // Atualiza maior lucro
+      if(currentProfit > positions[i].highestProfit)
+         positions[i].highestProfit = currentProfit;
+
+      // 1️⃣ BreakEven
+      if(BreakEvenPoints > 0 && !positions[i].breakEvenSet)
+      {
+         double profitPoints = positions[i].isBuy
+            ? (currentPrice - positions[i].entryPrice) / cachedPoint
+            : (positions[i].entryPrice - currentPrice) / cachedPoint;
+
+         if(profitPoints >= BreakEvenPoints)
+         {
+            double newSL = NS(positions[i].entryPrice + (positions[i].isBuy ? 1 : -1) * BreakEvenPlusPoints * cachedPoint);
+
+            if(ModifyPositionSL(positions[i].ticket, newSL))
+            {
+               positions[i].breakEvenSet = true;
+               positions[i].currentSL = newSL;
+
+               if(ShowChartInfo)
+                  PrintFormat("⚖️ BreakEven #%d @ %s", positions[i].ticket, DoubleToString(newSL, cachedDigits));
+
+               // Fechamento parcial
+               if(UsePartialClose && !positions[i].partialClosed && PartialClosePercent > 0)
+               {
+                  double closeVolume = NV(positions[i].volume * PartialClosePercent / 100.0);
+                  if(closeVolume >= minVolume)
+                  {
+                     if(ClosePartialPosition(positions[i].ticket, closeVolume))
+                     {
+                        positions[i].partialClosed = true;
+                        positions[i].volume -= closeVolume;
+
+                        if(ShowChartInfo)
+                  PrintFormat("📉 Parcial #%d | %.2f lots", positions[i].ticket, closeVolume);
+                     }
+                  }
+               }
+            }
+         }
+      }
+
+      // 2️⃣ Trailing Stop
+      double trailDist = TrailingStopPoints * cachedPoint;
+      double stepDist  = TrailingStepPoints * cachedPoint;
+      double newSL     = 0;
+
+      if(positions[i].isBuy)
+      {
+         newSL = NS(currentPrice - trailDist);
+
+         // Só move se estiver em lucro e respeitar o step
+         if(newSL > positions[i].entryPrice &&
+            (positions[i].currentSL == 0 || newSL > positions[i].currentSL + stepDist))
+         {
+            if(ModifyPositionSL(positions[i].ticket, newSL))
+            {
+               positions[i].currentSL = newSL;
+            }
+         }
+      }
+      else // SELL
+      {
+         newSL = NS(currentPrice + trailDist);
+
+         if(newSL < positions[i].entryPrice &&
+            (positions[i].currentSL == 0 || newSL < positions[i].currentSL - stepDist))
+         {
+            if(ModifyPositionSL(positions[i].ticket, newSL))
+            {
+               positions[i].currentSL = newSL;
+            }
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| ✅ Trailing Por Direção - BUYs juntos, SELLs juntos              |
+//+------------------------------------------------------------------+
+void ApplyDirectionalTrailing()
+{
+   int sz = ArraySize(positions);
+   if(sz == 0) return;
+
+   double buyMaxPrice  = 0;
+   double sellMinPrice = DBL_MAX;
+
+   for(int i = 0; i < sz; i++)
+   {
+      if(positions[i].isBuy)
+      {
+         if(cachedBid > buyMaxPrice) buyMaxPrice = cachedBid;
+      }
+      else
+      {
+         if(cachedAsk < sellMinPrice) sellMinPrice = cachedAsk;
+      }
+   }
+
+   const double trailDist = TrailingStopPoints * cachedPoint;
+   const double stepDist  = TrailingStepPoints * cachedPoint;
+   const double newBuySL  = (buyMaxPrice > 0) ? NS(buyMaxPrice - trailDist) : 0;
+   const double newSellSL = (sellMinPrice < DBL_MAX) ? NS(sellMinPrice + trailDist) : 0;
+
+   for(int i = 0; i < sz; i++)
+   {
+      if(positions[i].isBuy)
+      {
+         if(newBuySL > positions[i].entryPrice && (positions[i].currentSL == 0 || newBuySL > positions[i].currentSL + stepDist))
+         {
+            if(ModifyPositionSL(positions[i].ticket, newBuySL)) positions[i].currentSL = newBuySL;
+         }
+      }
+      else
+      {
+         if(newSellSL < positions[i].entryPrice && (positions[i].currentSL == 0 || newSellSL < positions[i].currentSL - stepDist))
+         {
+            if(ModifyPositionSL(positions[i].ticket, newSellSL)) positions[i].currentSL = newSellSL;
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| ✅ Trailing Global - todas posições movem juntas                 |
+//+------------------------------------------------------------------+
+void ApplyGlobalTrailing()
+{
+   int sz = ArraySize(positions);
+   if(sz == 0) return;
+
+   double totalBuyVolume  = 0, totalSellVolume = 0;
+   double buyWeightedPrice = 0, sellWeightedPrice = 0;
+
+   for(int i = 0; i < sz; i++)
+   {
+      if(positions[i].isBuy)
+      {
+         buyWeightedPrice += positions[i].entryPrice * positions[i].volume;
+         totalBuyVolume   += positions[i].volume;
+      }
+      else
+      {
+         sellWeightedPrice += positions[i].entryPrice * positions[i].volume;
+         totalSellVolume   += positions[i].volume;
+      }
+   }
+
+   const double trailDist = TrailingStopPoints * cachedPoint;
+   const double stepDist  = TrailingStepPoints * cachedPoint;
+   const double avgBuyEntry = (totalBuyVolume > 0) ? buyWeightedPrice / totalBuyVolume : 0;
+   const double avgSellEntry = (totalSellVolume > 0) ? sellWeightedPrice / totalSellVolume : 0;
+   const double newBuySL = NS(cachedBid - trailDist);
+   const double newSellSL = NS(cachedAsk + trailDist);
+
+   for(int i = 0; i < sz; i++)
+   {
+      if(positions[i].isBuy)
+      {
+         if(totalBuyVolume > 0 && newBuySL > avgBuyEntry && (positions[i].currentSL == 0 || newBuySL > positions[i].currentSL + stepDist))
+         {
+            if(ModifyPositionSL(positions[i].ticket, newBuySL)) positions[i].currentSL = newBuySL;
+         }
+      }
+      else
+      {
+         if(totalSellVolume > 0 && newSellSL < avgSellEntry && (positions[i].currentSL == 0 || newSellSL < positions[i].currentSL - stepDist))
+         {
+            if(ModifyPositionSL(positions[i].ticket, newSellSL)) positions[i].currentSL = newSellSL;
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Fecha parcialmente uma posição                                   |
+//+------------------------------------------------------------------+
+bool ClosePartialPosition(ulong ticket, double volume)
+{
+   if(!PositionSelectByTicket(ticket)) return false;
+   if(!CanSendTradeRequest()) return false;
+
+   string symbol = PositionGetString(POSITION_SYMBOL);
+   long   type   = PositionGetInteger(POSITION_TYPE);
+
+   MqlTradeRequest req = {};
+   MqlTradeResult  res = {};
+
+   req.action        = TRADE_ACTION_DEAL;
+   req.position      = ticket;
+   req.symbol        = symbol;
+   req.volume        = volume;
+   req.deviation     = 10;
+   req.magic         = MagicNumber;
+   req.comment       = EA_NAME;
+   req.type_filling  = GetMarketFilling();
+
+   if(type == POSITION_TYPE_BUY)
+   {
+      req.type  = ORDER_TYPE_SELL;
+      req.price = cachedBid;
+   }
+   else
+   {
+      req.type  = ORDER_TYPE_BUY;
+      req.price = cachedAsk;
+   }
+
+   if(OrderSend(req, res) &&
+      (res.retcode == TRADE_RETCODE_DONE || res.retcode == TRADE_RETCODE_PLACED))
+   {
+      consecutiveErrors = 0;
+      return true;
+   }
+
+   HandleTradeError(res.retcode);
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Modifica SL de uma posição                                       |
+//+------------------------------------------------------------------+
+bool ModifyPositionSL(ulong ticket, double newSL)
+{
+   if(!PositionSelectByTicket(ticket)) return false;
+   if(!CanSendTradeRequest()) return false;
+
+   double currentSL = PositionGetDouble(POSITION_SL);
+
+   // Evita modificações desnecessárias
+   if(MathAbs(newSL - currentSL) < cachedPoint * 0.5) return false;
+
+   MqlTradeRequest req = {};
+   MqlTradeResult  res = {};
+
+   req.action   = TRADE_ACTION_SLTP;
+   req.position = ticket;
+   req.symbol   = _Symbol;
+   req.sl       = newSL;
+   req.tp       = 0.0;
+   req.comment  = EA_NAME;
+
+   if(OrderSend(req, res) &&
+      (res.retcode == TRADE_RETCODE_DONE || res.retcode == TRADE_RETCODE_PLACED))
+   {
+      consecutiveErrors = 0;
+      return true;
+   }
+
+   HandleTradeError(res.retcode);
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Modifica preço e SL de uma ordem pendente                        |
+//+------------------------------------------------------------------+
+bool ModifyPendingOrder(ulong ticket, double newPrice, double newSL)
+{
+   if(!OrderSelect(ticket)) return false;
+   if(!CanSendTradeRequest()) return false;
+
+   double currentPrice = OrderGetDouble(ORDER_PRICE_OPEN);
+   double currentSL    = OrderGetDouble(ORDER_SL);
+
+   // Verifica se houve mudança significativa (mínimo 1.0 ponto ou 20% do UpdatePoints)
+   double minChange = MathMax(1.0, GetAdaptiveUpdatePoints() * 0.2) * cachedPoint;
+
+   if(MathAbs(newPrice - currentPrice) < minChange &&
+      MathAbs(newSL - currentSL) < minChange)
+      return false;
+
+   MqlTradeRequest req = {};
+   MqlTradeResult  res = {};
+
+   // Validação Rigorosa antes do envio
+   long type = OrderGetInteger(ORDER_TYPE);
+   bool isBuy = (type == ORDER_TYPE_BUY_STOP || type == ORDER_TYPE_BUY_LIMIT);
+
+   if(!IsPriceSafe(newPrice, isBuy, false) || !IsPriceSafe(newSL, isBuy, true))
+   {
+      // Se não for seguro, forçamos um ajuste fino respeitando o floor mínimo
+      double safetyFloor = (stopsLevel + dynamicSafetyPoints + cachedSpread + 2) * cachedPoint;
+
+      if(isBuy)
+         newPrice = MathMax(newPrice, cachedAsk + safetyFloor);
+      else
+         newPrice = MathMin(newPrice, cachedBid - safetyFloor);
+
+      newPrice = NS(newPrice);
+      newSL    = CalculateValidSL(newPrice, isBuy);
+
+      if(!IsPriceSafe(newPrice, isBuy, false)) return false;
+   }
+
+   req.action = TRADE_ACTION_MODIFY;
+   req.order  = ticket;
+   req.price  = newPrice;
+   req.sl     = newSL;
+   req.tp     = 0.0;
+   req.type_time = ORDER_TIME_GTC;
+   req.comment = EA_NAME;
+
+   if(OrderSend(req, res) &&
+      (res.retcode == TRADE_RETCODE_DONE || res.retcode == TRADE_RETCODE_PLACED))
+   {
+      consecutiveErrors = 0;
+      return true;
+   }
+
+   // Se falhou por estar muito perto do mercado, aplicamos um cooldown e forçamos a recriação se persistir
+   if(res.retcode == TRADE_RETCODE_INVALID_STOPS || res.retcode == TRADE_RETCODE_FROZEN || res.retcode == TRADE_RETCODE_INVALID_PRICE)
+   {
+      if(OrderGetInteger(ORDER_TYPE) == ORDER_TYPE_BUY_STOP) lastBuyModifyTick = GetTickCount64() + 3000;
+      else if(OrderGetInteger(ORDER_TYPE) == ORDER_TYPE_SELL_STOP) lastSellModifyTick = GetTickCount64() + 3000;
+
+      // Força o cancelamento da ordem problemática para que o sistema a recrie no local correto no próximo ciclo
+      CancelOrder(ticket);
+   }
+
+   HandleTradeError(res.retcode);
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Reposiciona toda a grade imediatamente (Lógica de Reversão)      |
+//+------------------------------------------------------------------+
+void RepositionGridImmediately(bool isBuy, double targetPrice)
+{
+   UpdatePriceCache(); // Garante preços atualizados antes do reposicionamento
+   ulong tickets[];
+   if(isBuy)
+   {
+      ArrayResize(tickets, ArraySize(buyStopTickets));
+      ArrayCopy(tickets, buyStopTickets);
+   }
+   else
+   {
+      ArrayResize(tickets, ArraySize(sellStopTickets));
+      ArrayCopy(tickets, sellStopTickets);
+   }
+
+   int count = ArraySize(tickets);
+   if(count == 0) return;
+
+   if(ShowChartInfo)
+      Print("🚀 Reposicionando Grade ", isBuy ? "BUY" : "SELL", " para ", DoubleToString(targetPrice, cachedDigits));
+
+   for(int i = 0; i < count; i++)
+   {
+      // Calcula o novo preço baseado no alvo e no espaçamento da grade
+      double newPrice = 0;
+      if(isBuy)
+         newPrice = targetPrice + (i * SpacingPoints) * cachedPoint;
+      else
+         newPrice = targetPrice - (i * SpacingPoints) * cachedPoint;
+
+      // Ajuste de segurança ultra-robusto (Stops Level + Dynamic Safety)
+      double minP = GetValidPendingPrice(isBuy, 0);
+      if(isBuy)
+      {
+         if(newPrice < minP) newPrice = minP;
+      }
+      else
+      {
+         if(newPrice > minP) newPrice = minP;
+      }
+
+      newPrice = NormalizeDouble(newPrice, cachedDigits);
+      double newSL = CalculateValidSL(newPrice, isBuy);
+
+      ModifyPendingOrder(tickets[i], newPrice, newSL);
+   }
+
+   // Atualiza os tickets globais e timestamps de modificação para evitar conflitos
+   if(isBuy) lastBuyModifyTick = GetTickCount64();
+   else      lastSellModifyTick = GetTickCount64();
+
+   SyncPendingOrders();
+}
+
+//+------------------------------------------------------------------+
+//| Retorna o SL mais avançado de um cluster                         |
+//+------------------------------------------------------------------+
+double GetClusterSL(bool isBuy)
+{
+   double bestSL = 0;
+   int sz = ArraySize(positions);
+
+   for(int i = 0; i < sz; i++)
+   {
+      if(positions[i].isBuy == isBuy)
+      {
+         double pSL = positions[i].currentSL;
+         if(pSL > 0)
+         {
+            if(bestSL == 0) bestSL = pSL;
+            else if(isBuy && pSL > bestSL)  bestSL = pSL;
+            else if(!isBuy && pSL < bestSL) bestSL = pSL;
+         }
+      }
+   }
+   return bestSL;
+}
+
+//+------------------------------------------------------------------+
+//| Sincroniza o SL de todas as posições de um cluster               |
+//+------------------------------------------------------------------+
+void SynchronizeClusterSL(bool isBuy)
+{
+   UpdatePositionTracker(); // Garante que o tracker está atualizado
+   double bestSL = GetClusterSL(isBuy);
+   if(bestSL == 0) return;
+
+   int sz = ArraySize(positions);
+   // 2. Aplica esse SL a todas as outras posições do mesmo grupo
+   for(int i = 0; i < sz; i++)
+   {
+      if(positions[i].isBuy == isBuy)
+      {
+         // Só modifica se o SL atual for diferente ou inexistente
+         if(MathAbs(positions[i].currentSL - bestSL) > cachedPoint * 0.5)
+         {
+            if(ModifyPositionSL(positions[i].ticket, bestSL))
+               positions[i].currentSL = bestSL;
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Atualiza cache de preços                                         |
+//+------------------------------------------------------------------+
+void UpdatePriceCache()
+{
+   if(SymbolInfoTick(_Symbol, currentTickData))
+   {
+      cachedBid    = currentTickData.bid;
+      cachedAsk    = currentTickData.ask;
+      cachedSpread = (cachedAsk - cachedBid) / (cachedPoint > 0 ? cachedPoint : _Point);
+   }
+
+   // Atualiza stops e freeze levels dinamicamente (algumas corretoras mudam em alta volatilidade)
+   stopsLevel  = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   freezeLevel = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL);
+
+   // Detecção de Mercado Volátil: se spread > 3x média, aumenta segurança levemente
+   if(averageSpread > 0 && cachedSpread > averageSpread * 3.0)
+   {
+      if(dynamicSafetyPoints < 15) dynamicSafetyPoints += 1;
+   }
+
+   // Decay rápido da segurança adaptativa (reduz 1 ponto a cada minuto para voltar à precisão rápido)
+   datetime now = TimeCurrent();
+   if(now - lastSafetyDecay > 60)
+   {
+      if(dynamicSafetyPoints > 2) dynamicSafetyPoints--;
+      lastSafetyDecay = now;
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Limita a frequência de mensagens para a corretora (Anti-Spam)    |
+//+------------------------------------------------------------------+
+bool CanSendTradeRequest()
+{
+   ulong currentTick = GetTickCount64();
+
+   // Buffer de rajada (burst): permite até 5 requisições rápidas, depois limita a 2 por segundo
+   if(currentTick - lastGlobalRequestTick > 1000)
+   {
+      lastGlobalRequestTick = currentTick;
+      requestsInWindow = 0;
+   }
+
+   if(requestsInWindow >= 5) return false;
+
+   requestsInWindow++;
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| Normaliza preço do símbolo (Alta Performance)                    |
+//+------------------------------------------------------------------+
+double NS(double price)
+{
+   return NormalizeDouble(price, cachedDigits);
+}
+
+//+------------------------------------------------------------------+
+//| Normaliza volume da operação (Alta Performance)                  |
+//+------------------------------------------------------------------+
+double NV(double volume)
+{
+   if(stepVolume <= 0) return NormalizeDouble(volume, 2);
+   return NormalizeDouble(MathRound(volume / stepVolume) * stepVolume, 2);
+}
+
+//+------------------------------------------------------------------+
+//| Valida se o preço está em uma distância institucional segura     |
+//+------------------------------------------------------------------+
+bool IsPriceSafe(double price, bool isBuy, bool isSL)
+{
+   if(price <= 0) return false;
+
+   // Buffer minimalista e preciso: Stops Level + segurança dinâmica + margem de 1 ponto
+   double totalBuffer = (stopsLevel + dynamicSafetyPoints + 1) * cachedPoint;
+
+   if(isBuy)
+   {
+      // Se for Buy Stop (preço acima do mercado) ou SL de Buy (preço abaixo do mercado)
+      if(!isSL) // BUY STOP
+         return (price > cachedAsk + totalBuffer);
+      else      // BUY SL
+         return (price < cachedBid - totalBuffer);
+   }
+   else
+   {
+      // Se for Sell Stop (preço abaixo do mercado) ou SL de Sell (preço acima do mercado)
+      if(!isSL) // SELL STOP
+         return (price < cachedBid - totalBuffer);
+      else      // SELL SL
+         return (price > cachedAsk + totalBuffer);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Atualiza ATR                                                     |
+//+------------------------------------------------------------------+
+void UpdateATRCache()
+{
+   datetime currentTime = TimeCurrent();
+   if(currentTime - lastATRUpdate < 60) return;
+
+   if(handleATR == INVALID_HANDLE) return;
+
+   // Verifica se os dados do indicador estão calculados e disponíveis
+   if(BarsCalculated(handleATR) < 14) return;
+
+   double atrBuffer[1];
+   if(CopyBuffer(handleATR, 0, 0, 1, atrBuffer) > 0)
+   {
+      cachedATR    = atrBuffer[0];
+      lastATRUpdate = currentTime;
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Calcula spread médio                                             |
+//+------------------------------------------------------------------+
+void CalculateAverageSpread()
+{
+   if(cachedSpread <= 0) return;
+
+   // O(1) update of average
+   spreadSum -= spreadHistory[spreadIndex];
+   spreadHistory[spreadIndex] = cachedSpread;
+   spreadSum += cachedSpread;
+
+   spreadIndex = (spreadIndex + 1) % 100;
+   if(!spreadHistoryReady && spreadIndex == 0) spreadHistoryReady = true;
+
+   int limit = spreadHistoryReady ? 100 : spreadIndex;
+   if(limit > 0) averageSpread = spreadSum / limit;
+}
+
+//+------------------------------------------------------------------+
+//| Monitora drawdown e Safe Mode                                    |
+//+------------------------------------------------------------------+
+void MonitorDrawdownAndSafeMode()
+{
+   double currentEquity = AccountInfoDouble(ACCOUNT_EQUITY);
+   if(currentEquity > maxEquityReached)
+      maxEquityReached = currentEquity;
+
+   double drawdown = 0;
+   if(maxEquityReached > 0)
+      drawdown = ((maxEquityReached - currentEquity) / maxEquityReached) * 100.0;
+
+   if(!safeModeActive && drawdown >= MaxDrawdownPercent)
+   {
+      Print("🛑 SAFE MODE ON - DD: ", DoubleToString(drawdown, 2), "%");
+      safeModeActive = true;
+   }
+   else if(safeModeActive && drawdown < MaxDrawdownPercent * 0.7)
+   {
+      Print("✅ SAFE MODE OFF");
+      safeModeActive     = false;
+      consecutiveErrors  = 0;
+   }
+
+   if(SafeModeOnErrors && consecutiveErrors >= MaxConsecutiveErrors && !safeModeActive)
+   {
+      Print("🛑 SAFE MODE ON - Erros: ", consecutiveErrors);
+      safeModeActive = true;
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Verifica condições de mercado                                    |
+//+------------------------------------------------------------------+
+bool IsMarketConditionSafe()
+{
+   if(safeModeActive) return false;
+
+   if(UseSpreadFilter)
+   {
+      CalculateAverageSpread();
+      if(averageSpread > 0 && cachedSpread > averageSpread * MaxSpreadMultiplier)
+         return false;
+   }
+
+   if(UseTimeFilter)
+   {
+      MqlDateTime dt;
+      datetime now = TimeCurrent();
+      TimeToStruct(now, dt);
+      if(dt.day_of_week == 5) // Friday
+      {
+         if((dt.hour * 60 + dt.min) >= (1440 - AvoidLastMinutesFriday)) return false;
+      }
+      else if(dt.day_of_week == 0) // Sunday
+      {
+         if((dt.hour * 60 + dt.min) <= AvoidFirstMinutesSunday) return false;
+      }
+   }
+
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| Conta posições abertas                                           |
+//+------------------------------------------------------------------+
+void CountOpenPositions(int &buyCount, int &sellCount, int &totalCount)
+{
+   buyCount = countBuy;
+   sellCount = countSell;
+   totalCount = countTotal;
+}
+
+//+------------------------------------------------------------------+
+//| Verifica se pode abrir mais posições                             |
+//+------------------------------------------------------------------+
+bool CanOpenMorePositions(bool isBuy)
+{
+   int buyCount, sellCount, totalCount;
+   CountOpenPositions(buyCount, sellCount, totalCount);
+
+   // Se MaxPositions for 0, permitimos a pirâmide infinita baseada apenas na margem
+   if(MaxPositions > 0 && totalCount >= MaxPositions)
+      return false;
+
+   if(isBuy && MaxBuyPositions > 0 && buyCount >= MaxBuyPositions)
+      return false;
+
+   if(!isBuy && MaxSellPositions > 0 && sellCount >= MaxSellPositions)
+      return false;
+
+   if(!AllowHedging)
+   {
+      if(isBuy && sellCount > 0) return false;
+      if(!isBuy && buyCount > 0) return false;
+   }
+
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| UpdatePoints adaptativo                                          |
+//+------------------------------------------------------------------+
+int GetAdaptiveUpdatePoints()
+{
+   if(!UseAdaptiveUpdate) return UpdatePoints;
+
+   if(cachedPoint <= 0) return UpdatePoints;
+
+   // Elasticidade inteligente: combina volatilidade (ATR) e custo operacional (Spread)
+   // Multiplicador de 0.3 no ATR permite capturar movimentos estruturais ignorando ruído
+   double atrFactor    = (cachedATR > 0) ? (cachedATR / cachedPoint * 0.3) : 0;
+   // Spread x 2.0 garante que não moveremos ordens por uma distância menor que o custo de transação
+   double spreadFactor = cachedSpread * 2.0;
+
+   int adaptive = (int)MathCeil(MathMax(atrFactor, spreadFactor));
+
+   // Retorna o maior entre o calculado e o fixo definido pelo usuário
+   return MathMax(adaptive, UpdatePoints);
+}
+
+//+------------------------------------------------------------------+
+//| Sistema de captura contínua                                      |
+//+------------------------------------------------------------------+
+void ManageContinuousPendingOrders()
+{
+   static double tradeLot = 0;
+   static int adaptiveUpdate = 0;
+   static datetime lastUpdate = 0;
+
+   datetime currentTime = TimeCurrent();
+
+   // Recalcula lote e sensibilidade apenas a cada 1 segundo para poupar CPU
+   if(currentTime != lastUpdate)
+   {
+      tradeLot = CalculateDynamicLot();
+      adaptiveUpdate = GetAdaptiveUpdatePoints();
+      lastUpdate = currentTime;
+   }
+
+   if(UseDynamicLot && !HasSufficientMargin(tradeLot * InitialOrdersCount))
+      return;
+
+   ManageBuyStops(tradeLot, adaptiveUpdate, currentTime);
+   ManageSellStops(tradeLot, adaptiveUpdate, currentTime);
+
+   lastOrderUpdateTime = currentTime;
+}
+
+//+------------------------------------------------------------------+
+//| Gerencia BUY Stops                                               |
+//+------------------------------------------------------------------+
+void ManageBuyStops(double lotSize, int updateThreshold, datetime currentTime)
+{
+   int currentCount = ArraySize(buyStopTickets);
+   ulong currentTick = GetTickCount64();
+
+   // 1. Manter Frequência: Adiciona ordens se faltarem (Resposta Ultra-Rápida)
+   if(currentCount < InitialOrdersCount)
+   {
+      // Se faltam ordens, ignoramos o delay para preencher a grade imediatamente
+      if(currentCount == 0 || currentTime - lastBuyOrderCreation >= RecreateDelaySeconds)
+      {
+         if(CanOpenMorePositions(true))
+         {
+            CreateBuyStops(lotSize, InitialOrdersCount - currentCount);
+            lastBuyOrderCreation = currentTime;
+         }
+      }
+      // Se acabamos de criar, aguardamos o próximo ciclo para permitir modificações
+      return;
+   }
+
+   // 2. Movimentação Inteligente: Modifica em vez de cancelar
+   if(currentCount > 0 && (currentTick - lastBuyModifyTick) >= (ulong)ModificationCooldownMS)
+   {
+      if(!OrderSelect(buyStopTickets[0]))
+      {
+         SyncPendingOrders();
+         return;
+      }
+
+      double currentOrderPrice = OrderGetDouble(ORDER_PRICE_OPEN);
+      double idealLeadPrice    = GetClusterSL(false); // Tenta seguir SL de SELLs
+      bool   isFollowingSL     = (idealLeadPrice > 0);
+
+      if(!isFollowingSL) idealLeadPrice = GetValidPendingPrice(true, 0);
+
+      // Se estiver seguindo SL, a sensibilidade é moderada para evitar spam
+      double threshold = isFollowingSL ? MathMax(2.0, cachedSpread * 0.5) * cachedPoint : updateThreshold * cachedPoint;
+
+      // Lógica Assertiva: Buy Stop acompanha se o preço CAIR (preço melhor)
+      // OU se estiver seguindo o SL de uma posição oposta (Reversão dinâmica)
+      if((!isFollowingSL && idealLeadPrice < currentOrderPrice - threshold) ||
+         (isFollowingSL && MathAbs(idealLeadPrice - currentOrderPrice) > threshold))
+      {
+         int modifiedCount = 0;
+         for(int i = 0; i < currentCount; i++)
+         {
+            double newPrice = isFollowingSL ? (idealLeadPrice + (i * SpacingPoints) * cachedPoint) : GetValidPendingPrice(true, (int)(i * SpacingPoints));
+
+            // Ajuste de segurança para Stops Level
+            double minP = GetValidPendingPrice(true, 0);
+            if(newPrice < minP) newPrice = minP;
+
+            newPrice = NS(newPrice);
+            double newSL = CalculateValidSL(newPrice, true);
+
+            if(ModifyPendingOrder(buyStopTickets[i], newPrice, newSL))
+               modifiedCount++;
+         }
+
+         if(modifiedCount > 0)
+         {
+            lastBuyModifyTick = currentTick;
+            if(ShowChartInfo) PrintFormat("🔄 Grade COMPRA: %d ordens movidas", modifiedCount);
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Gerencia SELL Stops                                              |
+//+------------------------------------------------------------------+
+void ManageSellStops(double lotSize, int updateThreshold, datetime currentTime)
+{
+   int currentCount = ArraySize(sellStopTickets);
+   ulong currentTick = GetTickCount64();
+
+   // 1. Manter Frequência: Adiciona ordens se faltarem (Resposta Ultra-Rápida)
+   if(currentCount < InitialOrdersCount)
+   {
+      // Se faltam ordens, ignoramos o delay para preencher a grade imediatamente
+      if(currentCount == 0 || currentTime - lastSellOrderCreation >= RecreateDelaySeconds)
+      {
+         if(CanOpenMorePositions(false))
+         {
+            CreateSellStops(lotSize, InitialOrdersCount - currentCount);
+            lastSellOrderCreation = currentTime;
+         }
+      }
+      return;
+   }
+
+   // 2. Movimentação Inteligente: Modifica em vez de cancelar
+   if(currentCount > 0 && (currentTick - lastSellModifyTick) >= (ulong)ModificationCooldownMS)
+   {
+      if(!OrderSelect(sellStopTickets[0]))
+      {
+         SyncPendingOrders();
+         return;
+      }
+
+      double currentOrderPrice = OrderGetDouble(ORDER_PRICE_OPEN);
+      double idealLeadPrice    = GetClusterSL(true); // Tenta seguir SL de BUYs
+      bool   isFollowingSL     = (idealLeadPrice > 0);
+
+      if(!isFollowingSL) idealLeadPrice = GetValidPendingPrice(false, 0);
+
+      // Se estiver seguindo SL, a sensibilidade é moderada para evitar spam
+      double threshold = isFollowingSL ? MathMax(2.0, cachedSpread * 0.5) * cachedPoint : updateThreshold * cachedPoint;
+
+      // Lógica Assertiva: Sell Stop acompanha se o preço SUBIR (preço melhor)
+      // OU se estiver seguindo o SL de uma posição oposta (Reversão dinâmica)
+      if((!isFollowingSL && idealLeadPrice > currentOrderPrice + threshold) ||
+         (isFollowingSL && MathAbs(idealLeadPrice - currentOrderPrice) > threshold))
+      {
+         int modifiedCount = 0;
+         for(int i = 0; i < currentCount; i++)
+         {
+            double newPrice = isFollowingSL ? (idealLeadPrice - (i * SpacingPoints) * cachedPoint) : GetValidPendingPrice(false, (int)(i * SpacingPoints));
+
+            // Ajuste de segurança para Stops Level
+            double minP = GetValidPendingPrice(false, 0);
+            if(newPrice > minP) newPrice = minP;
+
+            newPrice = NS(newPrice);
+            double newSL = CalculateValidSL(newPrice, false);
+
+            if(ModifyPendingOrder(sellStopTickets[i], newPrice, newSL))
+               modifiedCount++;
+         }
+
+         if(modifiedCount > 0)
+         {
+            lastSellModifyTick = currentTick;
+            if(ShowChartInfo) PrintFormat("🔄 Grade VENDA: %d ordens movidas", modifiedCount);
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Cria BUY Stops                                                   |
+//+------------------------------------------------------------------+
+bool CreateBuyStops(double lotSize, int count)
+{
+   if(count < 1) return false;
+   if(!CanSendTradeRequest()) return false;
+
+   int successCount = 0;
+   int startIndex = ArraySize(buyStopTickets);
+
+   for(int i = 0; i < count; i++)
+   {
+      double orderPrice = GetValidPendingPrice(true, (int)((startIndex + i) * SpacingPoints));
+      double orderSL    = CalculateValidSL(orderPrice, true);
+
+      if(orderPrice <= cachedAsk) continue;
+      if(orderSL <= 0 || orderSL >= orderPrice) continue;
+
+   MqlTradeRequest req = {};
+   MqlTradeResult  res = {};
+
+      req.action        = TRADE_ACTION_PENDING;
+      req.symbol        = _Symbol;
+      req.volume        = lotSize;
+      req.type          = ORDER_TYPE_BUY_STOP;
+      req.price         = orderPrice;
+      req.sl            = orderSL;
+      req.tp            = 0.0;
+      req.magic         = MagicNumber;
+      req.comment       = EA_NAME;
+      req.type_filling  = ORDER_FILLING_RETURN;
+      req.type_time     = ORDER_TIME_GTC;
+      req.deviation     = 0;
+
+      if(OrderSend(req, res) &&
+         (res.retcode == TRADE_RETCODE_DONE || res.retcode == TRADE_RETCODE_PLACED))
+      {
+         int sz = ArraySize(buyStopTickets);
+         ArrayResize(buyStopTickets, sz + 1);
+         buyStopTickets[sz] = res.order;
+         successCount++;
+         consecutiveErrors = 0;
+
+         if(ShowChartInfo) PrintFormat("➕ Grade COMPRA #%d", res.order);
+      }
+      else
+      {
+         HandleTradeError(res.retcode);
+         if(res.retcode == TRADE_RETCODE_LIMIT_ORDERS ||
+            res.retcode == TRADE_RETCODE_REQUOTE)
+            Sleep(10);
+      }
+   }
+
+   return (successCount > 0);
+}
+
+//+------------------------------------------------------------------+
+//| Cria SELL Stops                                                  |
+//+------------------------------------------------------------------+
+bool CreateSellStops(double lotSize, int count)
+{
+   if(count < 1) return false;
+   if(!CanSendTradeRequest()) return false;
+
+   int successCount = 0;
+   int startIndex = ArraySize(sellStopTickets);
+
+   for(int i = 0; i < count; i++)
+   {
+      double orderPrice = GetValidPendingPrice(false, (int)((startIndex + i) * SpacingPoints));
+      double orderSL    = CalculateValidSL(orderPrice, false);
+
+      if(orderPrice >= cachedBid) continue;
+      if(orderSL <= orderPrice || orderSL <= 0) continue;
+
+      MqlTradeRequest req = {};
+      MqlTradeResult  res = {};
+
+      req.action        = TRADE_ACTION_PENDING;
+      req.symbol        = _Symbol;
+      req.volume        = lotSize;
+      req.type          = ORDER_TYPE_SELL_STOP;
+      req.price         = orderPrice;
+      req.sl            = orderSL;
+      req.tp            = 0.0;
+      req.magic         = MagicNumber;
+      req.comment       = EA_NAME;
+      req.type_filling  = ORDER_FILLING_RETURN;
+      req.type_time     = ORDER_TIME_GTC;
+      req.deviation     = 0;
+
+      if(OrderSend(req, res) &&
+         (res.retcode == TRADE_RETCODE_DONE || res.retcode == TRADE_RETCODE_PLACED))
+      {
+         int sz = ArraySize(sellStopTickets);
+         ArrayResize(sellStopTickets, sz + 1);
+         sellStopTickets[sz] = res.order;
+         successCount++;
+         consecutiveErrors = 0;
+
+         if(ShowChartInfo) PrintFormat("➕ Grade VENDA #%d", res.order);
+      }
+      else
+      {
+         HandleTradeError(res.retcode);
+         if(res.retcode == TRADE_RETCODE_LIMIT_ORDERS ||
+            res.retcode == TRADE_RETCODE_REQUOTE)
+            Sleep(10);
+      }
+   }
+
+   return (successCount > 0);
+}
+
+//+------------------------------------------------------------------+
+//| Preço válido para pending                                        |
+//+------------------------------------------------------------------+
+double GetValidPendingPrice(bool isBuy, int additionalOffset = 0)
+{
+   // Floor de segurança absoluto da corretora
+   double brokerMin = stopsLevel + dynamicSafetyPoints + 1;
+
+   // Distância desejada pelo usuário
+   double userDist = OffsetPoints + additionalOffset;
+
+   // Garante que respeitamos o parâmetro do usuário, a menos que viole a regra da corretora
+   double finalDistPoints = MathMax(userDist, brokerMin);
+   double finalDist = finalDistPoints * cachedPoint;
+
+   if(isBuy)
+      return NS(cachedAsk + finalDist);
+   else
+      return NS(cachedBid - finalDist);
+}
+
+//+------------------------------------------------------------------+
+//| SL válido                                                         |
+//+------------------------------------------------------------------+
+double CalculateValidSL(double orderPrice, bool isBuy)
+{
+   // Distância mínima permitida pela corretora
+   double brokerMin = stopsLevel + dynamicSafetyPoints + 1;
+
+   // Distância desejada pelo usuário (StopLossPoints)
+   double userSL = (double)StopLossPoints;
+
+   // 1. Calcula o SL baseando-se no preço da ordem e respeitando o parâmetro do usuário
+   double distPoints = MathMax(userSL, brokerMin);
+   double sl = isBuy ? (orderPrice - distPoints * cachedPoint) : (orderPrice + distPoints * cachedPoint);
+
+   // 2. Validação contra o PREÇO DE MERCADO ATUAL (Regra de ouro das corretoras)
+   // O SL deve estar a pelo menos 'brokerMin' do Bid (Buy) ou Ask (Sell)
+   double marketPrice = isBuy ? cachedBid : cachedAsk;
+   double minMarketDist = brokerMin * cachedPoint;
+
+   if(isBuy)
+   {
+      if(sl > marketPrice - minMarketDist) sl = marketPrice - minMarketDist;
+   }
+   else
+   {
+      if(sl < marketPrice + minMarketDist) sl = marketPrice + minMarketDist;
+   }
+
+   return NS(sl);
+}
+
+//+------------------------------------------------------------------+
+//| Verifica freeze level                                            |
+//+------------------------------------------------------------------+
+bool CanModifyOrder(ulong ticket)
+{
+   if(!OrderSelect(ticket)) return false;
+
+   double orderPrice = OrderGetDouble(ORDER_PRICE_OPEN);
+   long   orderType  = OrderGetInteger(ORDER_TYPE);
+   double refPrice   = (orderType == ORDER_TYPE_BUY_STOP) ? cachedAsk : cachedBid;
+   double distance   = MathAbs(orderPrice - refPrice);
+
+   // Aumentada margem de segurança para Freeze e Stops level
+   int safetyLimit = MathMax(freezeLevel, stopsLevel) + 5;
+   return (distance > safetyLimit * cachedPoint);
+}
+
+//+------------------------------------------------------------------+
+//| Cancela ordem                                                    |
+//+------------------------------------------------------------------+
+bool CancelOrder(ulong ticket)
+{
+   if(ticket == 0) return false;
+   if(!CanModifyOrder(ticket)) return false;
+   if(!CanSendTradeRequest()) return false;
+
+   MqlTradeRequest req = {};
+   MqlTradeResult  res = {};
+
+   req.action = TRADE_ACTION_REMOVE;
+   req.order  = ticket;
+   req.comment = EA_NAME;
+
+   if(OrderSend(req, res) &&
+      (res.retcode == TRADE_RETCODE_DONE || res.retcode == TRADE_RETCODE_PLACED))
+   {
+      consecutiveErrors = 0;
+      return true;
+   }
+
+   HandleTradeError(res.retcode);
+   if(!OrderSelect(ticket)) return true;
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Filling mode                                                     |
+//+------------------------------------------------------------------+
+ENUM_ORDER_TYPE_FILLING GetMarketFilling()
+{
+   int mode = (int)SymbolInfoInteger(_Symbol, SYMBOL_FILLING_MODE);
+   if(mode == 2 || mode == 3) return ORDER_FILLING_IOC;
+   if(mode == 1)               return ORDER_FILLING_FOK;
+   return ORDER_FILLING_RETURN;
+}
+
+//+------------------------------------------------------------------+
+//| Calcula lote dinâmico                                            |
+//+------------------------------------------------------------------+
+double CalculateDynamicLot()
+{
+   if(!UseDynamicLot) return Lots;
+
+   double accountBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+   double accountEquity  = AccountInfoDouble(ACCOUNT_EQUITY);
+   double freeMargin     = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
+   double baseValue      = MathMin(accountBalance, accountEquity);
+
+   double riskAmount    = baseValue * (RiskPercent / 100.0);
+   double pointValue    = (cachedTickSize > 0 && cachedTickValue > 0)
+                          ? (cachedTickValue / cachedTickSize) * cachedPoint
+                          : cachedPoint * 10;
+
+   if(pointValue <= 0 || adjustedStopLossPoints <= 0) return Lots;
+
+   double calculatedLot = riskAmount / (adjustedStopLossPoints * pointValue);
+
+   calculatedLot = MathMin(calculatedLot, MaxLotSize);
+
+   double requiredMargin = 0;
+   if(OrderCalcMargin(ORDER_TYPE_BUY, _Symbol, calculatedLot, cachedAsk, requiredMargin))
+   {
+      double safeMargin = freeMargin * ((100.0 - MarginSafetyPercent) / 100.0);
+      if(requiredMargin > safeMargin && requiredMargin > 0)
+         calculatedLot *= (safeMargin / requiredMargin);
+   }
+
+   return NV(calculatedLot);
+}
+
+//+------------------------------------------------------------------+
+//| Verifica margem                                                  |
+//+------------------------------------------------------------------+
+bool HasSufficientMargin(double volume)
+{
+   double freeMargin     = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
+   double requiredMargin = 0;
+   if(!OrderCalcMargin(ORDER_TYPE_BUY, _Symbol, volume, cachedAsk, requiredMargin))
+      return false;
+   double safeMargin = freeMargin * ((100.0 - MarginSafetyPercent) / 100.0);
+   return (requiredMargin <= safeMargin);
+}
+
+//+------------------------------------------------------------------+
+//| Normaliza volume                                                 |
+//+------------------------------------------------------------------+
+
+//+------------------------------------------------------------------+
+//| Tratamento de erros                                              |
+//+------------------------------------------------------------------+
+void HandleTradeError(uint retcode)
+{
+   consecutiveErrors++;
+   int lastErr = GetLastError();
+
+   // Aumenta a segurança adaptativa levemente se o erro for proximidade ao mercado ou stops inválidos
+   if(retcode == TRADE_RETCODE_INVALID_STOPS || retcode == TRADE_RETCODE_FROZEN || retcode == TRADE_RETCODE_INVALID_PRICE)
+   {
+      if(dynamicSafetyPoints < 20) dynamicSafetyPoints += 2;
+      if(ShowChartInfo)
+         PrintFormat("🛡️ Ajuste Fino: %d pts", dynamicSafetyPoints);
+   }
+
+   if(!ShowChartInfo) return;
+
+   string msg = "";
+   switch(retcode)
+   {
+      case TRADE_RETCODE_REQUOTE:       msg = "Requote"; break;
+      case TRADE_RETCODE_PRICE_CHANGED: msg = "Preço alterado"; break;
+      case TRADE_RETCODE_REJECT:        msg = "Ordem rejeitada"; break;
+      case TRADE_RETCODE_INVALID_STOPS: msg = "Stops inválidos (Stops Level)"; break;
+      case TRADE_RETCODE_FROZEN:        msg = "Ativo congelado (Freeze Level)"; break;
+      case TRADE_RETCODE_INVALID_PRICE: msg = "Preço de execução inválido"; break;
+      case TRADE_RETCODE_NO_MONEY:      msg = "Margem insuficiente na conta"; break;
+      case TRADE_RETCODE_LIMIT_ORDERS:  msg = "Limite máximo de ordens atingido"; break;
+      case TRADE_RETCODE_TOO_MANY_REQUESTS: msg = "Muitas requisições (Spam)"; break;
+      case TRADE_RETCODE_TIMEOUT:       msg = "Tempo esgotado (Timeout)"; break;
+      default: msg = "Erro desconhecido (" + (string)retcode + ")"; break;
+   }
+
+   if(msg != "" && retcode != TRADE_RETCODE_REQUOTE && retcode != TRADE_RETCODE_PRICE_CHANGED)
+      PrintFormat("❌ Erro Trade: %s | Runtime: %d", msg, lastErr);
+}
+
+//+------------------------------------------------------------------+
+//| Display                                                          |
+//+------------------------------------------------------------------+
+void DisplayStatusInfo()
+{
+   if(!ShowChartInfo) return;
+
+   static uint lastDisplay = 0;
+   uint now = GetTickCount();
+   if(now - lastDisplay < 500) return; // Atualiza apenas a cada 500ms
+   lastDisplay = now;
+
+   double totalProfit = 0;
+   for(int i = 0; i < countTotal; i++)
+   {
+      if(PositionSelectByTicket(positions[i].ticket))
+         totalProfit += PositionGetDouble(POSITION_PROFIT);
+   }
+
+   double currentEquity = AccountInfoDouble(ACCOUNT_EQUITY);
+   double drawdown = (maxEquityReached > 0) ? ((maxEquityReached - currentEquity) / maxEquityReached) * 100.0 : 0;
+
+   string info = EA_NAME + " | v1.0\n";
+   info += "══════════════════════\n";
+   info += (safeModeActive) ? "🛑 MODO DE SEGURANÇA ATIVO" : "🔄 OPERAÇÃO NORMAL";
+
+   if(!safeModeActive)
+   {
+      info += "\nTrailing: ";
+      switch(TrailingMode)
+      {
+         case TRAILING_INDIVIDUAL:   info += "Individual"; break;
+         case TRAILING_BY_DIRECTION: info += "Direcional"; break;
+         case TRAILING_GLOBAL:       info += "Global"; break;
+      }
+
+      StringAdd(info, StringFormat("\n📊 Posições: %dB / %dS", countBuy, countSell));
+      StringAdd(info, StringFormat("\n💰 Lucro Flutuante: $%.2f", totalProfit));
+      StringAdd(info, StringFormat("\n📉 Drawdown: %.2f%%", drawdown));
+
+      StringAdd(info, StringFormat("\n📋 Pendentes: %dB / %dS", ArraySize(buyStopTickets), ArraySize(sellStopTickets)));
+
+      double spreadLimit = (averageSpread > 0) ? averageSpread * MaxSpreadMultiplier : 0;
+      StringAdd(info, StringFormat("\n📡 Spread: %.1f (Limite: %.1f)", cachedSpread, spreadLimit));
+
+      StringAdd(info, StringFormat("\n🏦 Equity: $%.2f", currentEquity));
+   }
+   info += "\n══════════════════════";
+
+   Comment(info);
+
+}
+
+//+------------------------------------------------------------------+
+//| Desinicialização                                                 |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+   if(handleATR != INVALID_HANDLE)
+      IndicatorRelease(handleATR);
+
+   Comment("");
+
+   int totalCanceled = 0;
+
+   for(int i = ArraySize(buyStopTickets) - 1; i >= 0; i--)
+      if(CancelOrder(buyStopTickets[i]))
+         totalCanceled++;
+
+   for(int i = ArraySize(sellStopTickets) - 1; i >= 0; i--)
+      if(CancelOrder(sellStopTickets[i]))
+         totalCanceled++;
+
+   Print("═══════════════════════════════════════════════");
+   Print(EA_NAME, " - Trailing Otimizado Finalizado");
+   Print("Ordens Canceladas: ", totalCanceled);
+   Print("═══════════════════════════════════════════════");
+}
