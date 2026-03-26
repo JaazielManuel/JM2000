@@ -1,0 +1,792 @@
+//=========================  MT-LiveExecutor v8.0  =========================
+// Integrando modelos avançados de IA para previsão e otimização de estratégias
+//========================================================================
+
+#include <Trade\Trade.mqh>
+#include <Trade\PositionInfo.mqh>
+#include <Trade\SymbolInfo.mqh>
+#include <Trade\AccountInfo.mqh>
+#include <Indicators\Indicators.mqh>
+
+// ---------- 1. DEFINIÇÕES GLOBAIS ----------
+#define EA_MAGIC 20260101
+enum Signal {BUY=1, SELL=-1, NONE=0};
+
+enum RuleType {
+    RULE_MA_CROSS,
+    RULE_RSI,
+    RULE_STOCH,
+    RULE_BB,
+    RULE_DAILY_BREAK,
+    RULE_DELTA,
+    RULE_VOLUME,
+    RULE_AMA,
+    RULE_BAR_PATTERN,
+    RULE_RS_RELATIVE
+};
+
+struct Rule {
+    bool      active;
+    RuleType  type;
+    int       tf;
+    int       p1, p2, p3;
+    double    d1, d2;
+    string    s1;
+    bool      is_cross;
+    int       p1_handle; // Handle para indicador principal
+    int       p2_handle; // Handle para indicador secundário
+    int       p3_handle; // Handle para terceiro indicador se necessário
+};
+
+// Parâmetros de Estratégia
+Rule rules[30];
+int nRules = 0;
+
+// Parâmetros Operacionais (Populados via prompt)
+double p_riskPercent = 1.0;
+double p_stopPoints = 300.0;
+double p_takePoints = 500.0;
+double p_trailingStopPoints = 0;
+double p_breakEvenTrigger = 0;
+double p_breakEvenPoints = 5;
+int    p_maxTrades = 3;
+int    p_startHour = 0;
+int    p_newsVetoMinutes = 20;
+bool   p_martingale = false;
+bool   p_hedge = false;
+ENUM_TIMEFRAMES p_frequency = PERIOD_M15;
+
+// Variáveis de Estado
+datetime lastBarTime = 0;
+int      dynamicSafetyPoints = 0;
+datetime lastSafetyDecay = 0;
+
+// Cache de Preço
+double currentBid = 0;
+double currentAsk = 0;
+double currentSpread = 0;
+
+CTrade trade;
+CPositionInfo posInfo;
+CSymbolInfo symInfo;
+CAccountInfo accInfo;
+
+//========================================================================
+
+// ---------- 2. MOTOR DE INTERPRETAÇÃO DE PROMPT ----------
+
+int PeriodoTexto(string nome)
+{
+   string n = nome;
+   StringToLower(n);
+   if(n=="m1" || n=="1")   return PERIOD_M1;
+   if(n=="m5" || n=="5")   return PERIOD_M5;
+   if(n=="m15" || n=="15") return PERIOD_M15;
+   if(n=="m30" || n=="30") return PERIOD_M30;
+   if(n=="h1" || n=="60")  return PERIOD_H1;
+   if(n=="h4" || n=="240") return PERIOD_H4;
+   if(n=="d1") return PERIOD_D1;
+   return PERIOD_CURRENT;
+}
+
+double ExtractNumber(string text, string keyword, int offset, int start_from=0)
+{
+    int start = StringFind(text, keyword, start_from);
+    if(start < 0) return 0;
+    start += offset;
+    string sub = StringSubstr(text, start);
+    string res = "";
+    for(int i=0; i<StringLen(sub); i++) {
+        ushort c = StringGetCharacter(sub, i);
+        if((c >= '0' && c <= '9') || c == '.') res += CharToString((uchar)c);
+        else if(StringLen(res) > 0) break;
+    }
+    return StringToDouble(res);
+}
+
+int AddRule(RuleType type, int tf, int p1=0, int p2=0, int p3=0, double d1=0.0, double d2=0.0, bool is_cross=false)
+{
+    // Verifica se já existe uma regra do mesmo tipo para atualizar em vez de duplicar
+    for(int i=0; i<nRules; i++) {
+        if(rules[i].type == type) {
+            rules[i].active = true;
+            rules[i].tf = tf;
+            rules[i].p1 = p1; rules[i].p2 = p2; rules[i].p3 = p3;
+            rules[i].d1 = d1; rules[i].d2 = d2;
+            rules[i].is_cross = is_cross;
+            // Reinicializar handles se necessário
+            if(rules[i].p1_handle != INVALID_HANDLE) IndicatorRelease(rules[i].p1_handle);
+            if(rules[i].p2_handle != INVALID_HANDLE) IndicatorRelease(rules[i].p2_handle);
+            rules[i].p1_handle = INVALID_HANDLE;
+            rules[i].p2_handle = INVALID_HANDLE;
+            return i;
+        }
+    }
+
+    if(nRules < 30) {
+        int idx = nRules;
+        rules[idx].active = true;
+        rules[idx].type = type;
+        rules[idx].tf = tf;
+        rules[idx].p1 = p1; rules[idx].p2 = p2; rules[idx].p3 = p3;
+        rules[idx].d1 = d1; rules[idx].d2 = d2;
+        rules[idx].is_cross = is_cross;
+        rules[idx].p1_handle = INVALID_HANDLE;
+        rules[idx].p2_handle = INVALID_HANDLE;
+        nRules++;
+        return idx;
+    }
+    return -1;
+}
+
+void ResetStrategy()
+{
+    // Limpar Handles dos Indicadores Atuais
+    for(int i=0; i<nRules; i++) {
+        if(rules[i].p1_handle != INVALID_HANDLE) IndicatorRelease(rules[i].p1_handle);
+        if(rules[i].p2_handle != INVALID_HANDLE) IndicatorRelease(rules[i].p2_handle);
+        if(rules[i].p3_handle != INVALID_HANDLE) IndicatorRelease(rules[i].p3_handle);
+        rules[i].active = false;
+        rules[i].p1_handle = INVALID_HANDLE;
+        rules[i].p2_handle = INVALID_HANDLE;
+        rules[i].p3_handle = INVALID_HANDLE;
+    }
+    nRules = 0;
+
+    // Resetar Parâmetros Operacionais para Padrões
+    p_riskPercent = 1.0;
+    p_stopPoints = 300.0;
+    p_takePoints = 500.0;
+    p_trailingStopPoints = 0;
+    p_breakEvenTrigger = 0;
+    p_breakEvenPoints = 5;
+    p_maxTrades = 3;
+    p_startHour = 0;
+    p_newsVetoMinutes = 20;
+    p_martingale = false;
+    p_hedge = false;
+    p_frequency = PERIOD_M15;
+}
+
+void InterpretaPrompt(string prompt)
+{
+   ResetStrategy();
+
+   string p = prompt;
+   StringToLower(p);
+
+   // 2.1 OPERATIONAL PARAMETERS
+   if(StringFind(p, "stop de ") >= 0) p_stopPoints = ExtractNumber(p, "stop de ", 8);
+   if(StringFind(p, "take de ") >= 0) p_takePoints = ExtractNumber(p, "take de ", 8);
+   if(StringFind(p, "risco de ") >= 0) p_riskPercent = ExtractNumber(p, "risco de ", 9);
+   if(StringFind(p, "depois das ") >= 0) p_startHour = (int)ExtractNumber(p, "depois das ", 11);
+   if(StringFind(p, "operar ") >= 0 && StringFind(p, "min antes") >= 0) p_newsVetoMinutes = (int)ExtractNumber(p, "operar ", 7);
+   if(StringFind(p, "máximo ") >= 0 && StringFind(p, " trades") >= 0) p_maxTrades = (int)ExtractNumber(p, "máximo ", 7);
+
+   // Break-even
+   if(StringFind(p, "move stop para entrada") >= 0) {
+       p_breakEvenTrigger = ExtractNumber(p, "atingir +", 9);
+       p_breakEvenPoints = ExtractNumber(p, "entrada +", 9);
+   }
+
+   // Frequência
+   if(StringFind(p, "a cada ") >= 0) {
+       int mins = (int)ExtractNumber(p, "a cada ", 7);
+       if(mins == 1) p_frequency = PERIOD_M1;
+       else if(mins == 5) p_frequency = PERIOD_M5;
+       else if(mins == 15) p_frequency = PERIOD_M15;
+       else if(mins == 30) p_frequency = PERIOD_M30;
+       else if(mins == 60) p_frequency = PERIOD_H1;
+   }
+
+   // 2.2 INDICATORS
+   // Média Móvel (Suporta Média de X ou Médias X/Y)
+   int maIdx = StringFind(p, "média");
+   if(maIdx >= 0) {
+       int p1 = 0, p2 = 0;
+       if(StringFind(p, " de ", maIdx) >= 0) {
+           p1 = (int)ExtractNumber(p, " de ", 4, maIdx);
+           // Checar se há segunda média (ex: 9/21)
+           int sep = StringFind(p, "/", maIdx);
+           if(sep >= 0 && sep < maIdx + 20) p2 = (int)ExtractNumber(p, "/", 1, maIdx);
+       }
+       bool is_cross = (StringFind(p, "cruzar") >= 0);
+       AddRule(RULE_MA_CROSS, p_frequency, p1, p2, 0, 0, 0, is_cross);
+   }
+
+   // RSI
+   int rsiIdx = StringFind(p, "rsi (");
+   if(rsiIdx >= 0) {
+       int period = (int)ExtractNumber(p, "rsi (", 5, rsiIdx);
+       double over = 70, under = 30;
+       if(StringFind(p, "acima de ", rsiIdx) >= 0) over = ExtractNumber(p, "acima de ", 9, rsiIdx);
+       if(StringFind(p, "abaixo de ", rsiIdx) >= 0) under = ExtractNumber(p, "abaixo de ", 10, rsiIdx);
+
+       // Determinando se é momentum ou reversão
+       if(StringFind(p, "compra", rsiIdx-10) >= 0 && StringFind(p, "acima de", rsiIdx) >= 0) {
+           AddRule(RULE_RSI, p_frequency, period, 1, 0, over, under, true); // p2=1: Momentum (Buy > Over)
+       } else {
+           AddRule(RULE_RSI, p_frequency, period, 0, 0, over, under, true); // p2=0: Reversion (Buy < Under)
+       }
+   }
+
+   // Stochastic
+   if(StringFind(p, "estocástico") >= 0 || StringFind(p, "stoch") >= 0) {
+       AddRule(RULE_STOCH, p_frequency, 5, 3, 3, 0, 0, true);
+   }
+
+   // Bollinger Bands
+   if(StringFind(p, "bollinger") >= 0 || StringFind(p, "bb") >= 0) {
+       AddRule(RULE_BB, p_frequency, 20, 0, 0, 2.0, 0, false);
+   }
+
+   // Rompimento Diário
+   if(StringFind(p, "rompimento diário") >= 0 || StringFind(p, "daily break") >= 0) {
+       AddRule(RULE_DAILY_BREAK, p_frequency);
+   }
+
+   // Delta de Agressão
+   if(StringFind(p, "delta") >= 0) {
+       int seconds = 60;
+       int trigger = 300;
+       if(StringFind(p, "delta (") >= 0) {
+           seconds = (int)ExtractNumber(p, "delta (", 7);
+           trigger = (int)ExtractNumber(p, ",", 1);
+       }
+       AddRule(RULE_DELTA, p_frequency, seconds, trigger);
+   }
+
+   // Ciclo de Volume
+   if(StringFind(p, "volume") >= 0) {
+       int len = 12;
+       if(StringFind(p, "volume (") >= 0) len = (int)ExtractNumber(p, "volume (", 8);
+       AddRule(RULE_VOLUME, p_frequency, len);
+   }
+
+   // AMA
+   if(StringFind(p, "ama") >= 0) {
+       AddRule(RULE_AMA, p_frequency, 10, 2, 30);
+   }
+
+   // Padrão de Barra
+   if(StringFind(p, "padrão de barra") >= 0 || StringFind(p, "inside bar") >= 0 || StringFind(p, "outside bar") >= 0) {
+       AddRule(RULE_BAR_PATTERN, p_frequency);
+   }
+
+   // Força Relativa
+   if(StringFind(p, "força relativa") >= 0) {
+       string bench = "US30";
+       // Simplificação: extração de benchmark entre aspas se existir
+       int bStart = StringFind(p, "\"");
+       if(bStart >= 0) {
+           int bEnd = StringFind(p, "\"", bStart+1);
+           if(bEnd > bStart) bench = StringSubstr(p, bStart+1, bEnd-bStart-1);
+       }
+       int idx = AddRule(RULE_RS_RELATIVE, p_frequency, 14, 0, 0, 0, 0, false);
+       if(idx >= 0) rules[idx].s1 = bench;
+   }
+
+   // Martingale / Hedge
+   if(StringFind(p, "martingale") >= 0) p_martingale = true;
+   if(StringFind(p, "hedge") >= 0) p_hedge = true;
+
+   lastBarTime = 0; // Forçar reavaliação imediata
+   Print("Prompt interpretado com sucesso.");
+}
+
+// ---------- 3. BIBLIOTECA DE INDICADORES & CONFLUÊNCIA ----------
+
+double iClose(string symbol, ENUM_TIMEFRAMES tf, int shift) {
+    double res[1];
+    if(CopyClose(symbol, tf, shift, 1, res) > 0) return res[0];
+    return 0;
+}
+
+double iHigh(string symbol, ENUM_TIMEFRAMES tf, int shift) {
+    double res[1];
+    if(CopyHigh(symbol, tf, shift, 1, res) > 0) return res[0];
+    return 0;
+}
+
+double iLow(string symbol, ENUM_TIMEFRAMES tf, int shift) {
+    double res[1];
+    if(CopyLow(symbol, tf, shift, 1, res) > 0) return res[0];
+    return 0;
+}
+
+double iOpen(string symbol, ENUM_TIMEFRAMES tf, int shift) {
+    double res[1];
+    if(CopyOpen(symbol, tf, shift, 1, res) > 0) return res[0];
+    return 0;
+}
+
+datetime iTime(string symbol, ENUM_TIMEFRAMES tf, int shift) {
+    datetime res[1];
+    if(CopyTime(symbol, tf, shift, 1, res) > 0) return res[0];
+    return 0;
+}
+
+Signal CheckMA(Rule &r, int shift=1)
+{
+    if(r.p1_handle == INVALID_HANDLE)
+        r.p1_handle = iMA(_Symbol, (ENUM_TIMEFRAMES)r.tf, r.p1, 0, MODE_EMA, PRICE_CLOSE);
+
+    double v1[2]; // [0] = index 1 (recent), [1] = index 2 (old)
+    if(CopyBuffer(r.p1_handle, 0, shift, 2, v1) < 2) return NONE;
+
+    if(r.p2 > 0) { // Crossover de duas Médias
+        if(r.p2_handle == INVALID_HANDLE)
+            r.p2_handle = iMA(_Symbol, (ENUM_TIMEFRAMES)r.tf, r.p2, 0, MODE_EMA, PRICE_CLOSE);
+
+        double v2[2];
+        if(CopyBuffer(r.p2_handle, 0, shift, 2, v2) < 2) return NONE;
+
+        if(v1[1] < v2[1] && v1[0] > v2[0]) return BUY;
+        if(v1[1] > v2[1] && v1[0] < v2[0]) return SELL;
+    } else { // Cruzamento Preço vs Média
+        double close_now = iClose(_Symbol, (ENUM_TIMEFRAMES)r.tf, shift);
+        double close_prev = iClose(_Symbol, (ENUM_TIMEFRAMES)r.tf, shift+1);
+
+        if(r.is_cross) {
+            if(close_prev < v1[1] && close_now > v1[0]) return BUY;
+            if(close_prev > v1[1] && close_now < v1[0]) return SELL;
+        } else {
+            if(close_now > v1[0]) return BUY;
+            if(close_now < v1[0]) return SELL;
+        }
+    }
+    return NONE;
+}
+
+Signal CheckRSI(Rule &r, int shift=1)
+{
+    if(r.p1_handle == INVALID_HANDLE)
+        r.p1_handle = iRSI(_Symbol, (ENUM_TIMEFRAMES)r.tf, r.p1, PRICE_CLOSE);
+
+    double val[2]; // [0] = index 1 (recent), [1] = index 2 (old)
+    if(CopyBuffer(r.p1_handle, 0, shift, 2, val) < 2) return NONE;
+
+    bool is_momentum = (r.p2 == 1);
+
+    if(is_momentum) {
+        // Buy if crossing ABOVE 'over' threshold, Sell if crossing BELOW 'under' threshold
+        if(val[1] < r.d1 && val[0] > r.d1) return BUY;
+        if(val[1] > r.d2 && val[0] < r.d2) return SELL;
+    } else {
+        // Buy if crossing BELOW 'under' threshold (Reversion), Sell if crossing ABOVE 'over'
+        if(val[1] > r.d2 && val[0] < r.d2) return BUY;
+        if(val[1] < r.d1 && val[0] > r.d1) return SELL;
+    }
+    return NONE;
+}
+
+Signal CheckStoch(Rule &r, int shift=1)
+{
+    if(r.p1_handle == INVALID_HANDLE)
+        r.p1_handle = iStochastic(_Symbol, (ENUM_TIMEFRAMES)r.tf, r.p1, r.p2, r.p3, MODE_SMA, STO_LOWHIGH);
+
+    double k[2], d[2]; // [0] = index 1 (recent), [1] = index 2 (old)
+    if(CopyBuffer(r.p1_handle, 0, shift, 2, k) < 2) return NONE;
+    if(CopyBuffer(r.p1_handle, 1, shift, 2, d) < 2) return NONE;
+
+    if(k[1] < d[1] && k[0] > d[0]) return BUY;
+    if(k[1] > d[1] && k[0] < d[0]) return SELL;
+    return NONE;
+}
+
+Signal CheckBB(Rule &r, int shift=1)
+{
+    if(r.p1_handle == INVALID_HANDLE)
+        r.p1_handle = iBands(_Symbol, (ENUM_TIMEFRAMES)r.tf, r.p1, 0, r.d1, PRICE_CLOSE);
+
+    double upper[1], lower[1];
+    if(CopyBuffer(r.p1_handle, 1, shift, 1, upper) < 1) return NONE;
+    if(CopyBuffer(r.p1_handle, 2, shift, 1, lower) < 1) return NONE;
+
+    double close = iClose(_Symbol, (ENUM_TIMEFRAMES)r.tf, shift);
+    if(close < lower[0]) return BUY;
+    if(close > upper[0]) return SELL;
+    return NONE;
+}
+
+Signal CheckDailyBreak(Rule &r, int shift=1)
+{
+    static datetime today = 0;
+    static double hi = 0, lo = 0;
+
+    datetime currentDay = iTime(_Symbol, PERIOD_D1, 0);
+    if(currentDay != today) {
+        today = currentDay;
+        hi = iHigh(_Symbol, PERIOD_D1, 1);
+        lo = iLow(_Symbol, PERIOD_D1, 1);
+    }
+
+    double close = iClose(_Symbol, (ENUM_TIMEFRAMES)r.tf, shift);
+    double point = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+
+    if(close > hi + point) return BUY;
+    if(close < lo - point) return SELL;
+    return NONE;
+}
+
+Signal CheckDelta(Rule &r, int shift=1)
+{
+    // p1 = seconds, p2 = deltaTrigger
+    MqlTick arr[];
+    int n = CopyTicksRange(_Symbol, arr, COPY_TICKS_TRADE, TimeCurrent() - r.p1, TimeCurrent());
+    long buy = 0, sell = 0;
+    for(int i=0; i<n; i++) {
+        if((arr[i].flags & TICK_FLAG_BUY) == TICK_FLAG_BUY) buy++;
+        else if((arr[i].flags & TICK_FLAG_SELL) == TICK_FLAG_SELL) sell++;
+    }
+    long delta = buy - sell;
+    if(delta > r.p2) return BUY;
+    if(delta < -r.p2) return SELL;
+    return NONE;
+}
+
+Signal CheckVolume(Rule &r, int shift=1)
+{
+    // p1 = length
+    long vol[];
+    ArraySetAsSeries(vol, true);
+    if(CopyRealVolume(_Symbol, (ENUM_TIMEFRAMES)r.tf, shift, r.p1, vol) < r.p1) return NONE;
+
+    int maxIdx = ArrayMaximum(vol);
+    int minIdx = ArrayMinimum(vol);
+
+    if(maxIdx == 0) return SELL;
+    if(minIdx == 0) return BUY;
+    return NONE;
+}
+
+Signal CheckAMA(Rule &r, int shift=1)
+{
+    if(r.p1_handle == INVALID_HANDLE)
+        r.p1_handle = iAMA(_Symbol, (ENUM_TIMEFRAMES)r.tf, r.p1, r.p2, r.p3, 0, PRICE_CLOSE);
+
+    double val[2]; // [0] = index 1 (recent), [1] = index 2 (old)
+    if(CopyBuffer(r.p1_handle, 0, shift, 2, val) < 2) return NONE;
+
+    if(val[1] < val[0]) return BUY;
+    if(val[1] > val[0]) return SELL;
+    return NONE;
+}
+
+Signal CheckBarPattern(Rule &r, int shift=1)
+{
+    double h0 = iHigh(_Symbol, (ENUM_TIMEFRAMES)r.tf, shift);
+    double l0 = iLow(_Symbol, (ENUM_TIMEFRAMES)r.tf, shift);
+    double h1 = iHigh(_Symbol, (ENUM_TIMEFRAMES)r.tf, shift+1);
+    double l1 = iLow(_Symbol, (ENUM_TIMEFRAMES)r.tf, shift+1);
+
+    double c0 = iClose(_Symbol, (ENUM_TIMEFRAMES)r.tf, shift);
+    double o0 = iOpen(_Symbol, (ENUM_TIMEFRAMES)r.tf, shift);
+
+    // Inside Bar
+    if(h0 < h1 && l0 > l1) return (c0 > o0) ? BUY : SELL;
+    // Outside Bar
+    if(h0 > h1 && l0 < l1) return (c0 > o0) ? SELL : BUY;
+
+    return NONE;
+}
+
+Signal CheckRSRelative(Rule &r, int shift=1)
+{
+    // s1 = benchmark asset, p1 = RSI period
+    if(r.p1_handle == INVALID_HANDLE)
+        r.p1_handle = iRSI(_Symbol, (ENUM_TIMEFRAMES)r.tf, r.p1, PRICE_CLOSE);
+    if(r.p2_handle == INVALID_HANDLE)
+        r.p2_handle = iRSI(r.s1, (ENUM_TIMEFRAMES)r.tf, r.p1, PRICE_CLOSE);
+
+    double r1[1], r2[1];
+    if(CopyBuffer(r.p1_handle, 0, shift, 1, r1) < 1) return NONE;
+    if(CopyBuffer(r.p2_handle, 0, shift, 1, r2) < 1) return NONE;
+
+    if(r1[0] > r2[0] + 5) return BUY;
+    if(r1[0] < r2[0] - 5) return SELL;
+    return NONE;
+}
+
+Signal AvaliaTudo()
+{
+    if(nRules == 0) return NONE;
+
+    Signal globalSignal = NONE;
+    bool first = true;
+
+    for(int i=0; i<nRules; i++) {
+        if(!rules[i].active) continue;
+
+        Signal s = NONE;
+        switch(rules[i].type) {
+            case RULE_MA_CROSS:     s = CheckMA(rules[i]); break;
+            case RULE_RSI:          s = CheckRSI(rules[i]); break;
+            case RULE_STOCH:        s = CheckStoch(rules[i]); break;
+            case RULE_BB:           s = CheckBB(rules[i]); break;
+            case RULE_DAILY_BREAK:  s = CheckDailyBreak(rules[i]); break;
+            case RULE_DELTA:        s = CheckDelta(rules[i]); break;
+            case RULE_VOLUME:       s = CheckVolume(rules[i]); break;
+            case RULE_AMA:          s = CheckAMA(rules[i]); break;
+            case RULE_BAR_PATTERN:  s = CheckBarPattern(rules[i]); break;
+            case RULE_RS_RELATIVE:  s = CheckRSRelative(rules[i]); break;
+            default: s = NONE; break;
+        }
+
+        if(first) {
+            globalSignal = s;
+            first = false;
+        } else {
+            if(globalSignal != s) return NONE; // Confluência AND
+        }
+    }
+
+    return globalSignal;
+}
+
+// ---------- 4. EXECUÇÃO, RISCO & CACHE ----------
+
+void UpdatePriceCache()
+{
+    MqlTick last_tick;
+    if(SymbolInfoTick(_Symbol, last_tick)) {
+        currentBid = last_tick.bid;
+        currentAsk = last_tick.ask;
+        currentSpread = (currentAsk - currentBid) / _Point;
+    }
+}
+
+double CalculateValidSL(ENUM_ORDER_TYPE type, double price, double points)
+{
+    double brokerMin = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) + dynamicSafetyPoints + 1;
+    double dist = MathMax(points, brokerMin) * _Point;
+
+    if(type == ORDER_TYPE_BUY)  return price - dist;
+    if(type == ORDER_TYPE_SELL) return price + dist;
+    return 0;
+}
+
+double CalculaLote(double riskPercent, double slPoints)
+{
+    double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+    double riskAmount = equity * (riskPercent / 100.0);
+
+    // Martingale: Check last deal for this symbol in last 24h
+    if(p_martingale) {
+        HistorySelect(TimeCurrent()-86400, TimeCurrent());
+        int total = HistoryDealsTotal();
+        for(int i=total-1; i>=0; i--) {
+            ulong ticket = HistoryDealGetTicket(i);
+            if(HistoryDealGetString(ticket, DEAL_SYMBOL) == _Symbol) {
+                long entry = HistoryDealGetInteger(ticket, DEAL_ENTRY);
+                if(entry == DEAL_ENTRY_OUT || entry == DEAL_ENTRY_OUT_BY) {
+                    if(HistoryDealGetDouble(ticket, DEAL_PROFIT) < 0) riskAmount *= 2.0;
+                    break;
+                }
+            }
+        }
+    }
+
+    double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+    double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+
+    if(slPoints <= 0) slPoints = p_stopPoints;
+
+    double volume = riskAmount / (slPoints * (tickValue / (tickSize / _Point)));
+
+    return NormalizeDouble(MathMax(volume, SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN)), 2);
+}
+
+void EnviaOrdem(Signal s)
+{
+    if(s == NONE) return;
+
+    UpdatePriceCache();
+
+    // Hedge Check & Count my positions
+    int myPositions = 0;
+    for(int i=PositionsTotal()-1; i>=0; i--) {
+        if(posInfo.SelectByIndex(i) && posInfo.Symbol() == _Symbol && posInfo.Magic() == EA_MAGIC) {
+            myPositions++;
+            if(!p_hedge) {
+                if((s == BUY && posInfo.PositionType() == POSITION_TYPE_SELL) ||
+                   (s == SELL && posInfo.PositionType() == POSITION_TYPE_BUY)) {
+                    trade.PositionClose(posInfo.Ticket());
+                    myPositions--;
+                }
+            }
+        }
+    }
+
+    if(myPositions >= p_maxTrades) return;
+
+    double sl = 0, tp = 0, price = 0;
+    double lot = CalculaLote(p_riskPercent, p_stopPoints);
+
+    if(s == BUY) {
+        price = currentAsk;
+        sl = CalculateValidSL(ORDER_TYPE_BUY, price, p_stopPoints);
+        tp = price + p_takePoints * _Point;
+        if(trade.Buy(lot, _Symbol, price, sl, tp, "MT-LiveExecutor")) {
+            if(trade.ResultRetcode() != TRADE_RETCODE_DONE && trade.ResultRetcode() != TRADE_RETCODE_PLACED) {
+                dynamicSafetyPoints = (int)MathMin(dynamicSafetyPoints + 5, 100);
+            } else {
+                Print("Compra executada: ", lot, " SL: ", sl, " TP: ", tp);
+            }
+        }
+    } else {
+        price = currentBid;
+        sl = CalculateValidSL(ORDER_TYPE_SELL, price, p_stopPoints);
+        tp = price - p_takePoints * _Point;
+        if(trade.Sell(lot, _Symbol, price, sl, tp, "MT-LiveExecutor")) {
+            if(trade.ResultRetcode() != TRADE_RETCODE_DONE && trade.ResultRetcode() != TRADE_RETCODE_PLACED) {
+                dynamicSafetyPoints = (int)MathMin(dynamicSafetyPoints + 5, 100);
+            } else {
+                Print("Venda executada: ", lot, " SL: ", sl, " TP: ", tp);
+            }
+        }
+    }
+}
+
+// ---------- 5. GESTÃO DE POSIÇÕES & AUXILIARES ----------
+
+void GerenciaPosicoes()
+{
+    UpdatePriceCache();
+    for(int i=PositionsTotal()-1; i>=0; i--) {
+        if(posInfo.SelectByIndex(i) && posInfo.Symbol() == _Symbol) {
+            double openPrice = posInfo.PriceOpen();
+            double curSL = posInfo.StopLoss();
+            double curTP = posInfo.TakeProfit();
+            double curPrice = (posInfo.PositionType() == POSITION_TYPE_BUY) ? currentBid : currentAsk;
+            double profitPoints = (posInfo.PositionType() == POSITION_TYPE_BUY) ? (curPrice - openPrice)/_Point : (openPrice - curPrice)/_Point;
+
+            // Break-even
+            if(p_breakEvenTrigger > 0 && profitPoints >= p_breakEvenTrigger) {
+                double newSL = (posInfo.PositionType() == POSITION_TYPE_BUY) ? openPrice + p_breakEvenPoints*_Point : openPrice - p_breakEvenPoints*_Point;
+                if((posInfo.PositionType() == POSITION_TYPE_BUY && (curSL < newSL || curSL == 0)) ||
+                   (posInfo.PositionType() == POSITION_TYPE_SELL && (curSL > newSL || curSL == 0))) {
+                    trade.PositionModify(posInfo.Ticket(), newSL, curTP);
+                }
+            }
+
+            // Trailing Stop
+            if(p_trailingStopPoints > 0 && profitPoints >= p_trailingStopPoints) {
+                double newSL = (posInfo.PositionType() == POSITION_TYPE_BUY) ? currentBid - p_trailingStopPoints*_Point : currentAsk + p_trailingStopPoints*_Point;
+                if((posInfo.PositionType() == POSITION_TYPE_BUY && newSL > curSL) ||
+                   (posInfo.PositionType() == POSITION_TYPE_SELL && (newSL < curSL || curSL == 0))) {
+                    trade.PositionModify(posInfo.Ticket(), newSL, curTP);
+                }
+            }
+        }
+    }
+}
+
+bool AguardaNoticias()
+{
+    int handle = FileOpen("news_veto.txt", FILE_READ|FILE_TXT|FILE_COMMON);
+    if(handle != INVALID_HANDLE) {
+        string val = FileReadString(handle);
+        FileClose(handle);
+        if(val == "1") return true;
+    }
+    return false;
+}
+
+void AIOptimizer()
+{
+    HistorySelect(TimeCurrent()-86400*30, TimeCurrent());
+    int total = HistoryDealsTotal();
+    double profit = 0;
+    int wins = 0, losses = 0;
+
+    for(int i=0; i<total; i++) {
+        ulong ticket = HistoryDealGetTicket(i);
+        if(HistoryDealGetString(ticket, DEAL_SYMBOL) == _Symbol) {
+            double p = HistoryDealGetDouble(ticket, DEAL_PROFIT);
+            profit += p;
+            if(p > 0) wins++; else if(p < 0) losses++;
+        }
+    }
+
+    double winRate = (wins+losses > 0) ? (double)wins/(wins+losses)*100.0 : 0;
+    Print("AI Optimizer: WinRate: ", winRate, "% Profit: ", profit);
+}
+
+void GravaLog(string texto)
+{
+    Print(texto);
+    int handle = FileOpen("MT_LiveExecutor_Log.txt", FILE_READ|FILE_WRITE|FILE_TXT|FILE_COMMON);
+    if(handle != INVALID_HANDLE) {
+        FileSeek(handle, 0, SEEK_END);
+        FileWrite(handle, TimeToString(TimeCurrent()), ": ", texto);
+        FileClose(handle);
+    }
+}
+
+// ---------- 6. CICLO DE VIDA MQL5 ----------
+
+int OnInit()
+{
+    trade.SetExpertMagicNumber(EA_MAGIC);
+    // Forçar leitura inicial do prompt
+    GlobalVariableSet("MT_Executor_Prompt_Update", 1);
+    EventSetTimer(60);
+    return(INIT_SUCCEEDED);
+}
+
+void OnDeinit(const int reason)
+{
+    for(int i=0; i<nRules; i++) {
+        if(rules[i].p1_handle != INVALID_HANDLE) IndicatorRelease(rules[i].p1_handle);
+        if(rules[i].p2_handle != INVALID_HANDLE) IndicatorRelease(rules[i].p2_handle);
+        if(rules[i].p3_handle != INVALID_HANDLE) IndicatorRelease(rules[i].p3_handle);
+    }
+    EventKillTimer();
+}
+
+void OnTick()
+{
+    if(AguardaNoticias()) return;
+
+    // Filtro de Horário
+    MqlDateTime dt;
+    TimeCurrent(dt);
+    if(dt.hour < p_startHour) return;
+
+    // Gerenciamento de posições ativas (Trailing/BE)
+    GerenciaPosicoes();
+
+    // Verificação de Sinais (Um por Barra)
+    datetime currentBar = iTime(_Symbol, (ENUM_TIMEFRAMES)p_frequency, 0);
+    if(currentBar != lastBarTime) {
+        Signal s = AvaliaTudo();
+        if(s != NONE) {
+            EnviaOrdem(s);
+            lastBarTime = currentBar;
+        }
+    }
+
+    // Decay de Safety Points
+    if(TimeCurrent() - lastSafetyDecay >= 60) {
+        if(dynamicSafetyPoints > 0) dynamicSafetyPoints--;
+        lastSafetyDecay = TimeCurrent();
+    }
+}
+
+void OnTimer()
+{
+    // Verificação de Atualização de Prompt (Sem reiniciar)
+    if(GlobalVariableGet("MT_Executor_Prompt_Update") > 0) {
+        int handle = FileOpen("MT_LiveExecutor_Prompt.txt", FILE_READ|FILE_TXT|FILE_COMMON);
+        if(handle != INVALID_HANDLE) {
+            string prompt = FileReadString(handle);
+            FileClose(handle);
+            InterpretaPrompt(prompt);
+            GlobalVariableSet("MT_Executor_Prompt_Update", 0);
+        }
+    }
+
+    // Otimização Periódica
+    AIOptimizer();
+}
