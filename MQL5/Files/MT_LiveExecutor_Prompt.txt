@@ -1,0 +1,1 @@
+A cada 15 minutos, depois das 10:00, compra se o preço cruzar acima da média de 20 e o RSI(14) estiver acima de 55. Venda se cruzar abaixo da média e RSI(14) estiver abaixo de 45. Stop de 30 pontos, take de 50 pontos. Risco de 1,0% por trade. Máximo 3 trades. Ao atingir +30 pontos, move stop para entrada +5 pontos.
