@@ -1,0 +1,2 @@
+// Set to VETO to block trades manually
+ALLOW
