@@ -1,0 +1,2 @@
+2024.12.01 10:00;EURUSD;High;Non-Farm Payrolls
+2024.12.01 14:30;USD;High;CPI Data
